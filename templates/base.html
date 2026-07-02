@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{% block title %}{{ T.app_name }}{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/imgs/favicon.png">
+  <link rel="stylesheet" href="/static/css/style.css?v=14">
+  {% block head %}{% endblock %}
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/"><img src="/imgs/logo.png" alt="{{ T.app_name }}" class="brand-logo"></a>
+  <nav>
+    <a href="/" class="{% block nav_ws %}{% endblock %}">{{ T.nav_workspaces }}</a>
+    <a href="/profile" class="{% block nav_profile %}{% endblock %}">{{ T.nav_profile }}</a>
+    {% if user.is_admin %}<a href="/admin" class="{% block nav_admin %}{% endblock %}">{{ T.nav_admin }}</a>{% endif %}
+    <a href="/guide" target="_blank" rel="noopener">{{ T.guide_btn }}</a>
+    <button class="btn-link" onclick="logout()">{{ T.logout_btn }}</button>
+  </nav>
+</header>
+{% endif %}
+<main class="container">
+{% block body %}{% endblock %}
+</main>
+<script>
+async function api(method, url, body, isForm) {
+  const opts = { method, headers: {} };
+  if (body !== undefined && body !== null) {
+    if (isForm) { opts.body = body; }
+    else { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  }
+  const r = await fetch(url, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(data.detail || '{{ T.error_generic }}');
+  return data;
+}
+async function logout() { await api('POST', '/api/auth/logout'); location.href = '/'; }
+function flash(el, msg, isError) {
+  el.textContent = msg;
+  el.className = 'flash ' + (isError ? 'flash-error' : 'flash-ok');
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+function fmtDuration(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  if (seconds < 60) return seconds + 's';
+  const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+  if (h) return h + 'h ' + m + 'm';
+  return m + 'm' + (s ? ' ' + s + 's' : '');
+}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

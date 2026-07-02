@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}Run #{{ run.id }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'runs' %}
+{% include "_ws_tabs.html" %}
+
+<div class="page-head">
+  <h2>Run #{{ run.id }} <span id="run-status" class="badge status-{{ run.status }}">{{ T['run_status_' + run.status] }}</span></h2>
+  <div>
+    <a class="btn" href="/workspace/{{ ws.id }}/codebook">{{ T.run_view_codebook }}</a>
+    <button id="retry-btn" class="btn" style="display:none" onclick="retryFailed()">{{ T.run_retry_failed }}</button>
+    {% if is_owner %}<button class="btn btn-danger" onclick="deleteRun()">{{ T.run_delete }}</button>{% endif %}
+  </div>
+</div>
+
+<div id="export-box" class="inline-form" {% if run.status != 'completed' and n_codings == 0 %}style="display:none"{% endif %}>
+  <a class="btn btn-small btn-primary" href="/workspace/{{ ws.id }}/runs/{{ run.id }}/analysis">{{ T.an_title }}</a>
+  <span class="muted">{{ T.run_export }}:</span>
+  <a class="btn btn-small" href="/api/runs/{{ run.id }}/export/xlsx">Excel</a>
+  <a class="btn btn-small" href="/api/runs/{{ run.id }}/export/qdc">QDC</a>
+  <a class="btn btn-small" href="/api/runs/{{ run.id }}/export/qdpx">QDPX</a>
+</div>
+
+<p class="muted">{{ run.engine if run.engine == 'dictionary' else run.model }} · {{ T.runs_unit|lower }}: {{ run.granularity }}{% if run.context_window %} · ctx {{ run.context_window }}{% endif %} · {{ T.runs_started_by }} {{ run.created_by.name }}</p>
+
+<div id="run-progress" class="progress-wrap" {% if run.status not in ('pending', 'running') %}style="display:none"{% endif %}>
+  <div class="progress"><div id="run-bar-fill" class="progress-fill"></div></div>
+  <div id="run-bar-label" class="muted small"></div>
+</div>
+
+<div class="stat-grid">
+  <div class="stat-card"><div id="stat-segments" class="stat-num small-num">{{ n_segments }}{% if n_segments %} / {{ n_uncoded }}{% if n_excluded %} / {{ n_excluded }}{% endif %}{% endif %}</div><div class="stat-label">{{ T.run_segments }}</div></div>
+  <div class="stat-card"><div id="stat-codings" class="stat-num">{{ n_codings }}</div><div class="stat-label">{{ T.run_codings }}</div></div>
+  <div class="stat-card"><div id="stat-newcodes" class="stat-num">{{ n_new_codes }}</div><div class="stat-label">{{ T.run_new_codes }}</div></div>
+  <div class="stat-card"><div id="stat-tokens" class="stat-num small-num">{{ run.cost_input_tokens }} / {{ run.cost_output_tokens }}</div><div class="stat-label">{{ T.run_tokens }}</div></div>
+  <div class="stat-card"><div id="stat-cost" class="stat-num">${{ '%.4f'|format(run.cost_usd or 0) }}</div><div class="stat-label">{{ T.run_cost }}</div></div>
+</div>
+
+<div id="run-error" class="flash flash-error" style="display:none"></div>
+
+<table class="table">
+  <thead><tr><th>File</th><th>{{ T.run_doc_status }}</th><th></th></tr></thead>
+  <tbody id="doc-rows">
+    {% for rd in run.run_documents %}
+    <tr>
+      <td>{{ rd.document.display_name }}</td>
+      <td><span class="badge status-{{ rd.status }}">{{ rd.status }}</span></td>
+      <td class="muted">{{ rd.coded_at.strftime('%H:%M:%S') if rd.coded_at else '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div id="run-flash" class="flash" style="display:none"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+const RUN_ID = {{ run.id }};
+let timer = null;
+
+function statusLabel(s) {
+  return {pending: '{{ T.run_status_pending }}', running: '{{ T.run_status_running }}',
+          completed: '{{ T.run_status_completed }}', failed: '{{ T.run_status_failed }}'}[s] || s;
+}
+
+async function refresh() {
+  try {
+    const r = await api('GET', '/api/runs/' + RUN_ID);
+    const st = document.getElementById('run-status');
+    st.textContent = statusLabel(r.status);
+    st.className = 'badge status-' + r.status;
+    document.getElementById('stat-segments').textContent =
+      r.n_segments ? (r.n_segments + ' / ' + r.n_uncoded + (r.n_excluded ? ' / ' + r.n_excluded : '')) : '0';
+    document.getElementById('stat-codings').textContent = r.n_codings;
+    document.getElementById('stat-newcodes').textContent = r.n_new_codes;
+    document.getElementById('stat-tokens').textContent = r.cost_input_tokens + ' / ' + r.cost_output_tokens;
+    document.getElementById('stat-cost').textContent = '$' + r.cost_usd.toFixed(4);
+    document.getElementById('doc-rows').innerHTML = r.documents.map(d =>
+      '<tr><td>' + esc(d.filename) + '</td><td><span class="badge status-' + d.status + '">' +
+      d.status + '</span></td><td class="muted">' + (d.coded_at || '') + '</td></tr>').join('');
+    const prog = document.getElementById('run-progress');
+    if (r.status === 'running' || r.status === 'pending') {
+      prog.style.display = '';
+      const pct = r.n_docs ? Math.round(r.n_docs_done / r.n_docs * 100) : 0;
+      document.getElementById('run-bar-fill').style.width = pct + '%';
+      let lbl = r.n_docs_done + ' / ' + r.n_docs + ' {{ T.run_documents_done }}';
+      if (r.eta_seconds != null) lbl += ' · ~' + fmtDuration(r.eta_seconds) + ' {{ T.run_eta_left }}';
+      document.getElementById('run-bar-label').textContent = lbl;
+    } else {
+      prog.style.display = 'none';
+    }
+    const err = document.getElementById('run-error');
+    if (r.error_message) { err.textContent = r.error_message; err.style.display = 'block'; }
+    else { err.style.display = 'none'; }
+    const hasFailed = r.documents.some(d => d.status === 'failed');
+    document.getElementById('retry-btn').style.display =
+      (hasFailed && r.status !== 'running' && r.status !== 'pending') ? '' : 'none';
+    document.getElementById('export-box').style.display =
+      (r.status === 'completed' || (r.n_codings > 0 && r.status !== 'running' && r.status !== 'pending')) ? '' : 'none';
+    if (r.status === 'completed' || r.status === 'failed') {
+      if (timer && !hasFailed) { clearInterval(timer); timer = null; }
+      if (timer && hasFailed) { clearInterval(timer); timer = null; }
+    }
+  } catch (err) { /* transient polling error: keep trying */ }
+}
+
+async function deleteRun() {
+  if (!confirm('{{ T.run_delete_confirm }}')) return;
+  try {
+    await api('DELETE', '/api/runs/' + RUN_ID);
+    location.href = '/workspace/{{ ws.id }}/runs';
+  } catch (err) { flash(document.getElementById('run-flash'), err.message, true); }
+}
+async function retryFailed() {
+  try {
+    await api('POST', '/api/runs/' + RUN_ID + '/retry-failed');
+    if (!timer) timer = setInterval(refresh, 2000);
+    refresh();
+  } catch (err) { flash(document.getElementById('run-flash'), err.message, true); }
+}
+
+{% if run.status in ('pending', 'running') %}
+timer = setInterval(refresh, 2000);
+{% endif %}
+refresh();
+</script>
+{% endblock %}

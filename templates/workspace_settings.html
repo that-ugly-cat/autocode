@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ ws.name }} · {{ T.tab_settings }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'settings' %}
+{% include "_ws_tabs.html" %}
+
+<div class="card">
+  <h2>{{ T.set_title }}</h2>
+  <form onsubmit="return saveSettings(event)">
+    <label>{{ T.ws_name }}<input type="text" id="set-name" value="{{ ws.name }}" required></label>
+    <label>{{ T.ws_description }}<input type="text" id="set-desc" value="{{ ws.description or '' }}"></label>
+    <label>{{ T.ws_study_context }}<textarea id="set-study" rows="3" placeholder="{{ T.ws_study_context_hint }}">{{ ws.study_context or '' }}</textarea></label>
+    <label>{{ T.ws_input_type }}
+      <select id="set-input" {% if ws.documents %}disabled title="{{ T.ws_input_locked }}"{% endif %}>
+        <option value="docx" {% if ws.input_type == 'docx' %}selected{% endif %}>{{ T.input_docx }}</option>
+        <option value="excel" {% if ws.input_type == 'excel' %}selected{% endif %}>{{ T.input_excel }}</option>
+      </select>
+      {% if ws.documents %}<span class="muted small">{{ T.ws_input_locked }}</span>{% endif %}
+    </label>
+    <p class="muted small">{{ T.ws_seg_run_note }}</p>
+    <div class="cards-label" style="margin-top:14px">{{ T.set_stoplists }}</div>
+    <p class="muted small">{{ T.set_stoplists_hint }}</p>
+    <div class="expr-grid">
+      {% for lang in spacy_langs %}
+      <label>{{ lang }}<textarea id="stop-{{ lang }}" rows="3" spellcheck="false">{{ (stoplists.get(lang) or [])|join('\n') }}</textarea></label>
+      {% endfor %}
+    </div>
+    <button type="submit" class="btn btn-primary">{{ T.set_save }}</button>
+  </form>
+  <div id="set-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card">
+  <h2>{{ T.set_members }}</h2>
+  <table class="table">
+    <tbody>
+      {% for m in ws.members %}
+      <tr>
+        <td>{{ m.user.name }} <span class="muted">{{ m.user.email }}</span></td>
+        <td>{% if m.user_id == ws.owner_id %}<span class="badge">{{ T.ws_owner }}</span>{% endif %}</td>
+        <td class="ta-right">
+          {% if m.user_id != ws.owner_id %}
+          <button class="btn btn-small btn-danger" onclick="removeMember({{ m.user_id }})">{{ T.set_remove }}</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form onsubmit="return addMember(event)" class="inline-form">
+    <input type="email" id="member-email" placeholder="{{ T.set_add_member }}" required>
+    <button type="submit" class="btn">{{ T.set_add_btn }}</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>{{ T.set_duplicate }}</h2>
+  <p class="muted small">{{ T.set_duplicate_hint }}</p>
+  <form onsubmit="return duplicateWs(event)">
+    <label>{{ T.set_duplicate_name }}<input type="text" id="dup-name" placeholder="{{ ws.name }} (copy)"></label>
+    <label class="check-row"><input type="checkbox" id="dup-codebook"> {{ T.set_duplicate_codebook }}</label>
+    <button type="submit" class="btn btn-primary">{{ T.set_duplicate_btn }}</button>
+  </form>
+  <div id="dup-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card card-danger">
+  <h2>{{ T.set_danger }}</h2>
+  <p class="muted">{{ T.set_delete_confirm }}</p>
+  <form onsubmit="return deleteWs(event)" class="inline-form">
+    <input type="text" id="confirm-name" placeholder="{{ ws.name }}">
+    <button type="submit" class="btn btn-danger">{{ T.set_delete_ws }}</button>
+  </form>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+document.querySelectorAll('.overlay').forEach(function(el) {
+  el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+});
+async function saveSettings(e) {
+  e.preventDefault();
+  const stoplists = {};
+  for (const lang of {{ spacy_langs|tojson }}) {
+    stoplists[lang] = document.getElementById('stop-' + lang).value
+      .split('\n').map(s => s.trim()).filter(s => s);
+  }
+  try {
+    await api('PUT', '/api/workspaces/{{ ws.id }}', {
+      name: document.getElementById('set-name').value,
+      stoplists: stoplists,
+      description: document.getElementById('set-desc').value,
+      study_context: document.getElementById('set-study').value,
+      input_type: document.getElementById('set-input').value,
+    });
+    flash(document.getElementById('set-flash'), '{{ T.saved }}', false);
+  } catch (err) { flash(document.getElementById('set-flash'), err.message, true); }
+  return false;
+}
+async function addMember(e) {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/members',
+              { email: document.getElementById('member-email').value });
+    location.reload();
+  } catch (err) { flash(document.getElementById('set-flash'), err.message, true); }
+  return false;
+}
+async function removeMember(id) {
+  if (!confirm('{{ T.confirm_delete }}')) return;
+  try { await api('DELETE', '/api/workspaces/{{ ws.id }}/members/' + id); location.reload(); }
+  catch (err) { flash(document.getElementById('set-flash'), err.message, true); }
+}
+async function deleteWs(e) {
+  e.preventDefault();
+  if (document.getElementById('confirm-name').value !== {{ ws.name|tojson }}) return false;
+  try { await api('DELETE', '/api/workspaces/{{ ws.id }}'); location.href = '/'; }
+  catch (err) { flash(document.getElementById('set-flash'), err.message, true); }
+  return false;
+}
+async function duplicateWs(e) {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type=submit]');
+  btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/workspaces/{{ ws.id }}/duplicate', {
+      name: document.getElementById('dup-name').value,
+      copy_codebook: document.getElementById('dup-codebook').checked,
+    });
+    location.href = '/workspace/' + r.id;
+  } catch (err) { btn.disabled = false; flash(document.getElementById('dup-flash'), err.message, true); }
+  return false;
+}
+</script>
+{% endblock %}

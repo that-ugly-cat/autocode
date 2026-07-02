@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ ws.name }} · {{ T.tab_codebook }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'codebook' %}
+{% include "_ws_tabs.html" %}
+
+<div class="page-head">
+  <h2>{{ T.cb_title }}</h2>
+  <div>
+    <button class="btn" onclick="document.getElementById('cb-help').classList.add('open')" title="{{ T.cb_help_title }}">?</button>
+    <a class="btn" href="/api/workspaces/{{ ws.id }}/codebook/export">{{ T.cb_export }}</a>
+    <button class="btn" onclick="toggleImport()">{{ T.cb_import }}</button>
+    <button class="btn btn-primary" onclick="toggleAdd()">{{ T.cb_add }}</button>
+  </div>
+</div>
+
+<div id="add-code" class="card" style="display:none">
+  <form onsubmit="return addCode(event)">
+    <label>{{ T.cb_label }}<input type="text" id="new-label" required></label>
+    <label>{{ T.cb_description }}<textarea id="new-desc" rows="2"></textarea></label>
+    <label>{{ T.cb_example }}<textarea id="new-example" rows="2"></textarea></label>
+    <div class="cards-label">{{ T.cb_expr_title }}</div>
+    <p class="muted small">{{ T.cb_expr_hint }}</p>
+    <div class="expr-grid">
+      {% for lang in ['en', 'de', 'fr', 'it'] %}
+      <label>{{ lang }}<textarea id="new-expr-{{ lang }}" rows="4" spellcheck="false"></textarea>
+        <div id="new-expr-prev-{{ lang }}"></div>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="inline-form">
+      <button type="button" class="btn" onclick="previewExprs('new-expr-', 'new-expr-prev-')">{{ T.cb_expr_preview }}</button>
+      <button type="submit" class="btn btn-primary">{{ T.cb_save }}</button>
+    </div>
+  </form>
+</div>
+
+<div id="import-box" class="card" style="display:none">
+  <p class="muted">{{ T.cb_import_hint }}</p>
+  <input type="file" id="import-file" accept=".xlsx,.xls">
+  <button class="btn" onclick="previewImport()">{{ T.cb_import_preview }}</button>
+  <div id="import-preview"></div>
+  <button id="import-confirm" class="btn btn-primary" style="display:none" onclick="confirmImport()">{{ T.cb_import_confirm }}</button>
+</div>
+
+<div id="expr-editor" class="card" style="display:none">
+  <h2>{{ T.cb_expr_title }}: <span id="expr-code-label"></span></h2>
+  <p class="muted">{{ T.cb_expr_hint }}</p>
+  <div class="expr-grid">
+    {% for lang in ['en', 'de', 'fr', 'it'] %}
+    <label>{{ lang }}<textarea id="expr-{{ lang }}" rows="6" spellcheck="false"></textarea>
+      <div id="expr-prev-{{ lang }}"></div>
+    </label>
+    {% endfor %}
+  </div>
+  <div class="inline-form">
+    <button class="btn" onclick="previewExprs('expr-', 'expr-prev-')">{{ T.cb_expr_preview }}</button>
+    <button class="btn btn-primary" onclick="saveExpr()">{{ T.cb_save }}</button>
+    <button class="btn" onclick="document.getElementById('expr-editor').style.display='none'">{{ T.cb_cancel }}</button>
+  </div>
+</div>
+
+<div id="cb-flash" class="flash" style="display:none"></div>
+
+<div class="overlay" id="cb-help">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">{{ T.cb_help_title }}</div>
+        <div class="modal-subtitle">{{ T.cb_help_sub }}</div>
+      </div>
+      <button class="modal-close" onclick="document.getElementById('cb-help').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.cb_help_bag_h }}</h4>
+      <p class="muted small">{{ T.cb_help_bag_p }}</p>
+      <p class="small"><code>control body</code> → {{ T.cb_help_bag_ex }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.cb_help_phrase_h }}</h4>
+      <p class="muted small">{{ T.cb_help_phrase_p }}</p>
+      <p class="small"><code>"go where I want"</code> → {{ T.cb_help_phrase_ex }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.cb_help_tips_h }}</h4>
+      <ul class="modal-list">
+        <li>{{ T.cb_help_tip1 }}</li>
+        <li>{{ T.cb_help_tip2 }}</li>
+        <li>{{ T.cb_help_tip3 }}</li>
+      </ul>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.cb_help_import_h }}</h4>
+      <p class="muted small">{{ T.cb_import_hint }}</p>
+    </div>
+  </div>
+</div>
+
+{% if not codes %}
+<p class="muted">{{ T.cb_empty }}</p>
+{% else %}
+<div class="cb-list" id="codes-table">
+  {% for code in codes %}
+  <div class="cb-card" id="code-row-{{ code.id }}"
+       data-label="{{ code.label }}" data-desc="{{ code.description or '' }}" data-example="{{ code.example or '' }}">
+    <div class="cb-card-head">
+      <div class="cb-card-title">
+        <strong>{{ code.label }}</strong>
+        {% if code.is_model_proposed %}
+        <span class="badge badge-model">{{ T.cb_model_badge }}{% if code.created_at %} — {{ code.created_at.strftime('%Y-%m-%d') }}{% endif %}</span>
+        {% endif %}
+      </div>
+      <div class="cb-card-meta">
+        {% set n = counts.get(code.id, 0) %}
+        {% if n %}<a class="badge" href="/workspace/{{ ws.id }}/codes/{{ code.id }}" title="{{ T.cb_extracts }}">{{ n }} {{ T.cb_extracts|lower }}</a>{% endif %}
+        {% set ec = expr_counts.get(code.id, {}) %}
+        {% for lang, cnt in ec.items()|sort %}<span class="badge badge-muted">{{ lang }} {{ cnt }}</span>{% endfor %}
+        <button class="btn btn-small" onclick="openExpr({{ code.id }})">{{ T.cb_expr_edit }}</button>
+        <button class="btn btn-small" onclick="editCode({{ code.id }})">{{ T.cb_edit }}</button>
+        <button class="btn btn-small btn-danger" onclick="deleteCode({{ code.id }})">{{ T.cb_delete }}</button>
+      </div>
+    </div>
+    {% if code.description %}<p class="cb-card-desc">{{ code.description }}</p>{% endif %}
+    {% if code.example %}<p class="cb-card-example muted">{{ code.example }}</p>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+let importRows = null;
+
+function toggleAdd() {
+  const el = document.getElementById('add-code');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+function toggleImport() {
+  const el = document.getElementById('import-box');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+async function addCode(e) {
+  e.preventDefault();
+  const expressions = {};
+  for (const lang of ['en', 'de', 'fr', 'it']) {
+    const lines = document.getElementById('new-expr-' + lang).value
+      .split('\n').map(s => s.trim()).filter(s => s);
+    if (lines.length) expressions[lang] = lines;
+  }
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/codes', {
+      label: document.getElementById('new-label').value,
+      description: document.getElementById('new-desc').value,
+      example: document.getElementById('new-example').value,
+      expressions: expressions,
+    });
+    location.reload();
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+  return false;
+}
+function editCode(id) {
+  const row = document.getElementById('code-row-' + id);
+  const label = row.dataset.label, desc = row.dataset.desc, example = row.dataset.example;
+  row.innerHTML =
+    '<label>{{ T.cb_label }}<input type="text" id="edit-label-' + id + '" value="' + esc(label) + '"></label>' +
+    '<label>{{ T.cb_description }}<textarea id="edit-desc-' + id + '" rows="3">' + esc(desc) + '</textarea></label>' +
+    '<label>{{ T.cb_example }}<textarea id="edit-example-' + id + '" rows="2">' + esc(example) + '</textarea></label>' +
+    '<div class="inline-form">' +
+    '<button class="btn btn-small btn-primary" onclick="saveCode(' + id + ')">{{ T.cb_save }}</button>' +
+    '<button class="btn btn-small" onclick="location.reload()">{{ T.cb_cancel }}</button></div>';
+}
+async function saveCode(id) {
+  try {
+    await api('PUT', '/api/codes/' + id, {
+      label: document.getElementById('edit-label-' + id).value,
+      description: document.getElementById('edit-desc-' + id).value,
+      example: document.getElementById('edit-example-' + id).value,
+    });
+    location.reload();
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+async function deleteCode(id) {
+  if (!confirm('{{ T.confirm_delete }}')) return;
+  try { await api('DELETE', '/api/codes/' + id); location.reload(); }
+  catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+async function previewImport() {
+  const input = document.getElementById('import-file');
+  if (!input.files.length) return;
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  try {
+    const res = await api('POST', '/api/workspaces/{{ ws.id }}/codebook/preview-import', form, true);
+    importRows = res.rows.filter(r => !r.duplicate);
+    let html = '<table class="table"><thead><tr><th>{{ T.cb_label }}</th><th>{{ T.cb_description }}</th><th></th></tr></thead><tbody>';
+    for (const r of res.rows) {
+      html += '<tr class="' + (r.duplicate ? 'row-muted' : '') + '"><td>' + esc(r.label) + '</td><td>' +
+        esc(r.description || '') + '</td><td>' + (r.duplicate ? '<span class="badge badge-muted">{{ T.cb_import_skipped }}</span>' : '') + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    document.getElementById('import-preview').innerHTML = html;
+    document.getElementById('import-confirm').style.display = importRows.length ? '' : 'none';
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+async function confirmImport() {
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/codebook/import', { rows: importRows });
+    location.reload();
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+
+let exprCodeId = null;
+const EXPR_LANGS = ['en', 'de', 'fr', 'it'];
+async function previewExprs(inPrefix, outPrefix) {
+  const expressions = {};
+  for (const lang of EXPR_LANGS) {
+    const lines = document.getElementById(inPrefix + lang).value
+      .split('\n').map(s => s.trim()).filter(s => s);
+    if (lines.length) expressions[lang] = lines;
+    document.getElementById(outPrefix + lang).innerHTML = '';
+  }
+  if (!Object.keys(expressions).length) return;
+  try {
+    const r = await api('POST', '/api/expressions/preview', { expressions });
+    for (const lang of EXPR_LANGS) {
+      const out = document.getElementById(outPrefix + lang);
+      out.innerHTML = (r.preview[lang] || []).map(it => {
+        let warn = '';
+        if (it.lemmas.length === 0) warn = ' <span class="expr-warn">⚠ {{ T.cb_expr_never }}</span>';
+        else if (it.lemmas.length === 1) warn = ' <span class="expr-warn">⚠ {{ T.cb_expr_weak }}</span>';
+        const sep = it.mode === 'phrase' ? ' ' : ' + ';
+        const modeLabel = it.mode === 'phrase' ? '{{ T.cb_mode_phrase }}' : '{{ T.cb_mode_bag }}';
+        return '<div class="expr-prev-line">' + esc(it.expression) +
+               ' → <span class="badge badge-muted">' + modeLabel + '</span> <strong>' +
+               (esc(it.lemmas.join(sep)) || '—') + '</strong>' + warn + '</div>';
+      }).join('');
+    }
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+async function openExpr(id) {
+  try {
+    const r = await api('GET', '/api/codes/' + id + '/expressions');
+    exprCodeId = id;
+    const row = document.getElementById('code-row-' + id);
+    document.getElementById('expr-code-label').textContent = row ? row.dataset.label : '';
+    for (const lang of EXPR_LANGS) {
+      document.getElementById('expr-' + lang).value = (r.expressions[lang] || []).join('\n');
+    }
+    const ed = document.getElementById('expr-editor');
+    ed.style.display = '';
+    ed.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+document.querySelectorAll('.overlay').forEach(function(el) {
+  el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+});
+async function saveExpr() {
+  const expressions = {};
+  for (const lang of EXPR_LANGS) {
+    expressions[lang] = document.getElementById('expr-' + lang).value
+      .split('\n').map(s => s.trim()).filter(s => s);
+  }
+  try {
+    await api('PUT', '/api/codes/' + exprCodeId + '/expressions', { expressions });
+    location.reload();
+  } catch (err) { flash(document.getElementById('cb-flash'), err.message, true); }
+}
+</script>
+{% endblock %}

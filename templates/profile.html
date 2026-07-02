@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block nav_profile %}active{% endblock %}
+{% block title %}{{ T.prof_title }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+<h1>{{ T.prof_title }}</h1>
+<p class="muted">{{ user.name }} · {{ user.email }}</p>
+
+<div class="card">
+  <h2>{{ T.prof_api_key }}</h2>
+  <p class="muted">{{ T.prof_api_key_hint }}</p>
+  {% if masked_key %}
+  <p><span class="badge badge-ok">{{ T.prof_api_key_set }}</span> <code>{{ masked_key }}</code></p>
+  {% else %}
+  <p><span class="badge badge-warn">{{ T.prof_api_key_none }}</span></p>
+  {% endif %}
+  <form onsubmit="return saveKey(event)" class="inline-form">
+    <input type="password" id="api-key" placeholder="sk-ant-…" autocomplete="off" required>
+    <button type="submit" class="btn btn-primary">{{ T.prof_save_key }}</button>
+    {% if masked_key %}
+    <button type="button" class="btn btn-danger" onclick="removeKey()">{{ T.prof_remove_key }}</button>
+    {% endif %}
+  </form>
+  <div id="key-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card">
+  <h2>{{ T.prof_2fa }}</h2>
+  <p><span class="badge badge-ok">{{ T.prof_2fa_on }}</span></p>
+  <p class="muted small">{{ T.prof_2fa_hint }}</p>
+  <form onsubmit="return regenBackup(event)" class="inline-form">
+    <input type="text" id="2fa-code" inputmode="numeric" placeholder="123456" required>
+    <button type="submit" class="btn">{{ T.prof_2fa_regen }}</button>
+  </form>
+  <div id="backup-out" style="display:none; margin-top:10px">
+    <p class="muted small">{{ T.tfa_backup_hint }}</p>
+    <pre id="backup-list" class="backup-codes"></pre>
+  </div>
+  <div id="2fa-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card">
+  <h2>{{ T.prof_costs }}</h2>
+  <p>{{ T.prof_cost_total }}: <strong>${{ '%.4f'|format(total_cost) }}</strong></p>
+  {% if cost_rows %}
+  <table class="table">
+    <thead><tr><th>Run</th><th>Tokens in</th><th>Tokens out</th><th>USD</th><th></th></tr></thead>
+    <tbody>
+      {% for row in cost_rows %}
+      <tr>
+        <td>#{{ row.run_id }}</td>
+        <td>{{ row.input_tokens }}</td>
+        <td>{{ row.output_tokens }}</td>
+        <td>${{ '%.4f'|format(row.cost_usd) }}</td>
+        <td class="muted">{{ row.recorded_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function saveKey(e) {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/profile/api-key', { api_key: document.getElementById('api-key').value });
+    location.reload();
+  } catch (err) { flash(document.getElementById('key-flash'), err.message, true); }
+  return false;
+}
+async function removeKey() {
+  if (!confirm('{{ T.confirm_delete }}')) return;
+  try { await api('DELETE', '/api/profile/api-key'); location.reload(); }
+  catch (err) { flash(document.getElementById('key-flash'), err.message, true); }
+}
+async function regenBackup(e) {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/api/profile/2fa/backup-codes',
+                        { code: document.getElementById('2fa-code').value });
+    document.getElementById('backup-list').textContent = (r.backup_codes || []).join('\n');
+    document.getElementById('backup-out').style.display = '';
+  } catch (err) { flash(document.getElementById('2fa-flash'), err.message, true); }
+  return false;
+}
+</script>
+{% endblock %}

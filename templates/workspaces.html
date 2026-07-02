@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block body %}
+<div class="page-head">
+  <h1>{{ T.ws_title }}</h1>
+  <button class="btn btn-primary" onclick="toggleNew()">{{ T.ws_new }}</button>
+</div>
+
+<div id="new-ws" class="card" style="display:none">
+  <form onsubmit="return createWs(event)">
+    <label>{{ T.ws_name }}<input type="text" id="ws-name" required></label>
+    <label>{{ T.ws_description }}<input type="text" id="ws-desc"></label>
+    <label>{{ T.ws_input_type }} <button type="button" class="btn btn-small" onclick="document.getElementById('help-input').classList.add('open')">?</button>
+      <select id="ws-input">
+        <option value="docx">{{ T.input_docx }}</option>
+        <option value="excel">{{ T.input_excel }}</option>
+      </select>
+    </label>
+    <p class="muted small">{{ T.ws_seg_run_note }}</p>
+    <button type="submit" class="btn btn-primary">{{ T.ws_create }}</button>
+  </form>
+  <div id="ws-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="overlay" id="help-input">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.help_input_title }}</div></div>
+      <button class="modal-close" onclick="document.getElementById('help-input').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.input_docx }}</h4>
+      <p class="muted small">{{ T.help_input_docx }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.input_excel }}</h4>
+      <p class="muted small">{{ T.help_input_excel }}</p>
+    </div>
+    <div class="modal-section">
+      <p class="muted small">{{ T.help_input_note }}</p>
+    </div>
+  </div>
+</div>
+
+{% if not owned and not shared %}
+<p class="muted">{{ T.ws_empty }}</p>
+{% endif %}
+
+<div class="ws-grid">
+  {% for ws in owned %}
+  <a class="ws-card" href="/workspace/{{ ws.id }}">
+    <div class="ws-card-head"><strong>{{ ws.name }}</strong><span class="badge">{{ T.ws_owner }}</span></div>
+    {% if ws.description %}<p class="muted">{{ ws.description }}</p>{% endif %}
+    <p class="muted small">{{ ws.documents|length }} docs · {{ ws.members|length }} members</p>
+  </a>
+  {% endfor %}
+  {% for ws in shared %}
+  <a class="ws-card" href="/workspace/{{ ws.id }}">
+    <div class="ws-card-head"><strong>{{ ws.name }}</strong><span class="badge badge-muted">{{ T.ws_member }}</span></div>
+    {% if ws.description %}<p class="muted">{{ ws.description }}</p>{% endif %}
+    <p class="muted small">{{ ws.documents|length }} docs · {{ ws.members|length }} members</p>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function toggleNew() {
+  const el = document.getElementById('new-ws');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+document.querySelectorAll('.overlay').forEach(function(el) {
+  el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+});
+async function createWs(e) {
+  e.preventDefault();
+  try {
+    const data = await api('POST', '/api/workspaces', {
+      name: document.getElementById('ws-name').value,
+      description: document.getElementById('ws-desc').value,
+      input_type: document.getElementById('ws-input').value,
+    });
+    location.href = '/workspace/' + data.id;
+  } catch (err) { flash(document.getElementById('ws-flash'), err.message, true); }
+  return false;
+}
+</script>
+{% endblock %}

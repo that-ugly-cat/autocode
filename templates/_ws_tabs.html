@@ -1,0 +1,11 @@
+<div class="ws-header">
+  <h1>{{ ws.name }}</h1>
+  {% if ws.description %}<p class="muted">{{ ws.description }}</p>{% endif %}
+</div>
+<nav class="tabs">
+  <a href="/workspace/{{ ws.id }}" class="{% if active_tab == 'overview' %}active{% endif %}">{{ T.tab_overview }}</a>
+  <a href="/workspace/{{ ws.id }}/corpus" class="{% if active_tab == 'corpus' %}active{% endif %}">{{ T.tab_corpus }}</a>
+  <a href="/workspace/{{ ws.id }}/codebook" class="{% if active_tab == 'codebook' %}active{% endif %}">{{ T.tab_codebook }}</a>
+  <a href="/workspace/{{ ws.id }}/runs" class="{% if active_tab == 'runs' %}active{% endif %}">{{ T.tab_runs }}</a>
+  {% if is_owner %}<a href="/workspace/{{ ws.id }}/settings" class="{% if active_tab == 'settings' %}active{% endif %}">{{ T.tab_settings }}</a>{% endif %}
+</nav>

@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ T.an_title }} · Run #{{ run.id }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'runs' %}
+{% include "_ws_tabs.html" %}
+
+<div class="page-head">
+  <h2>{{ T.an_title }} — Run #{{ run.id }}</h2>
+  <div>
+    <a class="btn" href="/workspace/{{ ws.id }}/runs/{{ run.id }}">← Run</a>
+    {% if not computing %}
+    <a class="btn" href="/workspace/{{ ws.id }}/runs/{{ run.id }}/analysis?recompute=1">{{ T.an_recompute }}</a>
+    <a class="btn btn-primary" href="/api/runs/{{ run.id }}/analysis/export">{{ T.an_export_data }}</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if computing %}
+<div class="card">
+  <h2>{{ T.an_computing }}</h2>
+  <p class="muted small">{{ T.an_computing_hint }}</p>
+  <div class="progress-wrap">
+    <div class="progress"><div id="an-bar-fill" class="progress-fill"></div></div>
+    <div id="an-bar-label" class="muted small"></div>
+  </div>
+  <div id="an-flash" class="flash flash-error" style="display:none"></div>
+</div>
+{% else %}
+<p class="muted">
+  {{ run.engine if run.engine == 'dictionary' else run.model }} · {{ data.meta.n_segments }} {{ T.corpus_segments }} ·
+  {{ data.meta.n_coded }} coded · {{ T.an_computed }}: {{ data.meta.computed_at }}
+</p>
+
+{% for name in chart_names %}
+{% set is_drill = name.startswith('lemmas_') or name.startswith('expressions_') %}
+{% set base = 'lemmas' if name.startswith('lemmas_') else ('expressions' if name.startswith('expressions_') else name) %}
+<div class="card">
+  <div class="page-head">
+    <h2>{{ T['an_chart_' + base] }}{% if is_drill %} — {{ name.split('_', 1)[1] }}{% endif %}</h2>
+    <div class="nowrap">
+      <a id="png-{{ name }}" class="btn btn-small" href="/api/runs/{{ run.id }}/analysis/chart/{{ name }}?fmt=png&theme=light&download=1">PNG</a>
+      <a id="pdf-{{ name }}" class="btn btn-small" href="/api/runs/{{ run.id }}/analysis/chart/{{ name }}?fmt=pdf&theme=light&download=1">PDF</a>
+    </div>
+  </div>
+  {% if is_drill %}
+  <div class="inline-form">
+    <label class="nowrap" style="margin:0">{{ T.an_lemma_code }}
+      <select id="code-{{ name }}" onchange="updateDrill('{{ name }}')">
+        <option value="">{{ T.an_all }}</option>
+        {% for b in data.codes %}<option value="{{ b.label }}">{{ b.label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="nowrap" style="margin:0">{{ T.an_lemma_group }}
+      <select id="group-{{ name }}" onchange="updateDrill('{{ name }}')" disabled>
+        <option value="">{{ T.an_all }}</option>
+        {% for g in lemma_groups %}<option value="{{ g or '(no group)' }}">{{ g or '(no group)' }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  {% endif %}
+  <img id="img-{{ name }}" class="an-chart" src="/api/runs/{{ run.id }}/analysis/chart/{{ name }}?fmt=png&theme=dark" alt="{{ name }}">
+
+  {% if name == 'groups' and data.groups %}
+  <table class="table" style="margin-top:12px">
+    <thead><tr><th>{{ T.cb_label }}</th>
+      {% for g in data.groups.groups %}<th>{{ g or '(no group)' }} %</th><th>Δ</th>{% endfor %}
+      <th>mean</th></tr></thead>
+    <tbody>
+      {% for r in data.groups.rows %}
+      <tr><td>{{ r.label }}</td>
+        {% for g in data.groups.groups %}
+        <td>{{ r.pct[g] }}</td>
+        <td class="muted">{{ '%+.1f'|format(r.deviation[g]) }}</td>
+        {% endfor %}
+        <td class="muted">{{ r.mean }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if data.top_extracts %}
+<div class="card">
+  <div class="page-head">
+    <h2>{{ T.an_chart_top_extracts }}</h2>
+    <div class="inline-form" style="margin:0">
+      <label class="nowrap" style="margin:0">{{ T.an_lemma_code }}
+        <select id="top-code" onchange="renderTop()">
+          <option value="">{{ T.an_all }}</option>
+          {% for b in data.codes %}<option value="{{ b.label }}">{{ b.label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label class="nowrap" style="margin:0">{{ T.an_lemma_group }}
+        <select id="top-group" onchange="renderTop()">
+          <option value="">{{ T.an_all }}</option>
+          {% for g in lemma_groups %}<option value="{{ g or '(no group)' }}">{{ g or '(no group)' }}</option>{% endfor %}
+        </select>
+      </label>
+    </div>
+  </div>
+  <p class="muted small">{{ T.an_top_hint }}</p>
+  <div id="top-extracts-out"></div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+{% if computing %}
+const RUN_ID = {{ run.id }};
+const RECOMPUTE = {{ 'true' if recompute else 'false' }};
+function showErr(msg) {
+  const el = document.getElementById('an-flash');
+  el.textContent = msg; el.style.display = 'block';
+}
+async function pollProgress() {
+  try {
+    const r = await api('GET', '/api/runs/' + RUN_ID + '/analysis/progress');
+    if (r.status === 'done') {
+      location.href = '/workspace/{{ ws.id }}/runs/' + RUN_ID + '/analysis';
+      return;
+    }
+    if (r.status === 'error') { showErr(r.error || 'error'); return; }
+    const fill = document.getElementById('an-bar-fill');
+    const label = document.getElementById('an-bar-label');
+    if (r.total) {
+      fill.style.width = Math.round(r.done / r.total * 100) + '%';
+      label.textContent = r.done + ' / ' + r.total + ' {{ T.run_documents_done }}';
+    } else {
+      fill.style.width = '6%';
+      label.textContent = '…';
+    }
+    setTimeout(pollProgress, 800);
+  } catch (e) { setTimeout(pollProgress, 1500); }
+}
+(async function () {
+  try { await api('POST', '/api/runs/' + RUN_ID + '/analysis/compute' + (RECOMPUTE ? '?recompute=1' : '')); }
+  catch (e) { showErr(e.message); return; }
+  pollProgress();
+})();
+{% else %}
+function updateDrill(name) {
+  const code = document.getElementById('code-' + name).value;
+  const groupSel = document.getElementById('group-' + name);
+  groupSel.disabled = !code;
+  if (!code) groupSel.value = '';
+  const group = code ? groupSel.value : '';
+  const q = (code ? '&code=' + encodeURIComponent(code) : '')
+          + (group ? '&group=' + encodeURIComponent(group) : '');
+  const base = '/api/runs/{{ run.id }}/analysis/chart/' + name;
+  document.getElementById('img-' + name).src = base + '?fmt=png&theme=dark' + q;
+  document.getElementById('png-' + name).href = base + '?fmt=png&theme=light&download=1' + q;
+  document.getElementById('pdf-' + name).href = base + '?fmt=pdf&theme=light&download=1' + q;
+}
+
+{% if data.top_extracts %}
+const TOP_OVERALL = {{ data.top_extracts|tojson }};
+const TOP_BY_GROUP = {{ (data.top_extracts_by_group or [])|tojson }};
+const _overall = {}, _byGroup = {};
+TOP_OVERALL.forEach(b => { _overall[b.code] = b.extracts; });
+TOP_BY_GROUP.forEach(b => { (_byGroup[b.code] = _byGroup[b.code] || {})[b.group] = b.extracts; });
+function renderTop() {
+  const codeF = document.getElementById('top-code').value;
+  const groupF = document.getElementById('top-group').value;
+  const useGroup = groupF !== '';
+  const rawGroup = groupF === '(no group)' ? '' : groupF;
+  let html = '';
+  for (const b of TOP_OVERALL) {
+    if (codeF && b.code !== codeF) continue;
+    const extracts = useGroup ? ((_byGroup[b.code] || {})[rawGroup] || []) : (_overall[b.code] || []);
+    html += '<details class="accordion"><summary>' + esc(b.code) +
+            ' <span class="muted small">(' + extracts.length + ')</span></summary>';
+    if (!extracts.length) html += '<p class="muted small">{{ T.an_no_extracts }}</p>';
+    for (const e of extracts) {
+      html += '<div class="segment"><span class="seg-time">{{ T.ext_score }} ' + e.score +
+              (e.row ? ' · row ' + e.row : '') + '</span><span>' + esc(e.text) +
+              '</span><div class="muted small">' + esc(e.document) + '</div></div>';
+    }
+    html += '</details>';
+  }
+  document.getElementById('top-extracts-out').innerHTML = html || '<p class="muted small">—</p>';
+}
+renderTop();
+{% endif %}
+{% endif %}
+</script>
+{% endblock %}

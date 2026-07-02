@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autocode
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8007:8007"
+    env_file:
+      - .env
+    # Guardrail on a shared 4 GB / 2-CPU box: cap RAM so an autocode spike can't
+    # starve the other containers (it spills to host swap before OOM). Pin BLAS/
+    # spaCy to one thread each so they don't oversubscribe the two cores.
+    mem_limit: 1500m
+    environment:
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+    volumes:
+      - ./data:/app/data

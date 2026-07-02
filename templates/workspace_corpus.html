@@ -1,0 +1,508 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ ws.name }} · {{ T.tab_corpus }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'corpus' %}
+{% include "_ws_tabs.html" %}
+{% set is_docx = ws.input_type != 'excel' %}
+
+{% if not is_docx %}
+<div class="card">
+  <h2>{{ T.corpus_upload_excel }}</h2>
+  <p class="muted">{{ T.corpus_excel_hint }}</p>
+  <input type="file" id="xlsx-file" accept=".xlsx,.xls">
+  <button class="btn" onclick="inspectXlsx()">{{ T.corpus_excel_inspect }}</button>
+  <div id="xlsx-picker" style="display:none">
+    <label id="xlsx-sheet-row" style="display:none">{{ T.corpus_excel_sheet }}
+      <select id="xlsx-sheet" onchange="renderColumns()"></select>
+    </label>
+    <div class="cards-label" style="margin-top:10px">{{ T.corpus_excel_columns }}</div>
+    <div id="xlsx-columns"></div>
+    <label class="nowrap" style="margin-top:10px">{{ T.corpus_excel_group }}
+      <select id="xlsx-group"></select>
+    </label>
+    <p class="muted small">{{ T.corpus_excel_group_hint }}</p>
+    <button class="btn btn-primary" onclick="confirmXlsx()">{{ T.corpus_excel_confirm }}</button>
+  </div>
+  <div id="corpus-flash" class="flash" style="display:none"></div>
+</div>
+{% else %}
+<div class="card">
+  <h2>{{ T.corpus_upload }}</h2>
+  <p class="muted small">{{ T.corpus_upload_hint }}</p>
+  <form onsubmit="return uploadDocs(event)">
+    <input type="file" id="doc-files" accept=".docx,.txt,.html,.htm" multiple required>
+    <button type="submit" id="upload-btn" class="btn btn-primary">{{ T.corpus_upload_btn }}</button>
+  </form>
+  <div id="upload-progress" class="progress-wrap" style="display:none">
+    <div class="progress"><div id="upload-bar-fill" class="progress-fill"></div></div>
+    <div id="upload-bar-label" class="muted small"></div>
+  </div>
+  <div id="corpus-flash" class="flash" style="display:none"></div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ T.corpus_bundle_title }}</h2>
+  <p class="muted small">{{ T.corpus_bundle_hint }}</p>
+  <div class="inline-form">
+    {% if ws.documents %}<a class="btn" href="/api/workspaces/{{ ws.id }}/corpus/export">{{ T.corpus_export }}</a>{% endif %}
+    <input type="file" id="bundle-file" accept=".autocorpus,.zip">
+    <button id="bundle-btn" class="btn btn-primary" onclick="importBundle()">{{ T.corpus_import }}</button>
+  </div>
+  <div id="bundle-flash" class="flash" style="display:none"></div>
+</div>
+
+{% if not ws.documents %}
+<p class="muted">{{ T.corpus_empty }}</p>
+{% else %}
+<div class="inline-form">
+  <input type="text" id="bulk-group" placeholder="{{ T.corpus_group }}" style="max-width:200px">
+  <button class="btn btn-small" onclick="bulkGroup()">{{ T.corpus_bulk_group }}</button>
+  <span class="muted small">{{ T.corpus_bulk_hint }}</span>
+</div>
+<div class="filter-bar" id="corpus-filter">
+  <span class="muted small">{{ T.corpus_filter }}:</span>
+  <select id="filter-lang" onchange="applyFilters()"><option value="">{{ T.corpus_filter_lang }}</option></select>
+  <select id="filter-group" onchange="applyFilters()"><option value="">{{ T.corpus_filter_group }}</option></select>
+  {% if is_docx %}<select id="filter-conv" onchange="applyFilters()"><option value="">{{ T.corpus_filter_conv }}</option></select>{% endif %}
+  <span class="muted small" id="filter-count"></span>
+</div>
+<table class="table" id="docs-table">
+  <thead><tr>
+    <th><input type="checkbox" onchange="document.querySelectorAll('.doc-sel').forEach(c => c.checked = this.checked)"></th>
+    <th><button class="th-sort" onclick="sortDocs('name')">File ⇅</button></th>
+    <th><button class="th-sort" onclick="sortDocs('date')">{{ T.corpus_uploaded_by }} ⇅</button></th>
+    <th><button class="th-sort" onclick="sortDocs('lang')">{{ T.corpus_language }} ⇅</button></th>
+    <th><button class="th-sort" onclick="sortDocs('group')">{{ T.corpus_group }} ⇅</button></th>
+    {% if is_docx %}<th><button class="th-sort" onclick="sortDocs('conv')">{{ T.corpus_convention }} ⇅</button>
+      <button class="btn btn-small" onclick="document.getElementById('conv-help').classList.add('open')">?</button></th>{% endif %}
+    <th></th><th></th>
+  </tr></thead>
+  <tbody>
+    {% for doc in ws.documents %}
+    <tr data-name="{{ doc.display_name }}" data-date="{{ doc.uploaded_at.strftime('%Y-%m-%d %H:%M:%S') }}"
+        data-lang="{{ doc.language or '' }}" data-group="{{ doc.group_label or '' }}"
+        data-conv="{{ doc.convention or '' }}">
+      <td><input type="checkbox" class="doc-sel" value="{{ doc.id }}"></td>
+      <td>{{ doc.display_name }}</td>
+      <td class="muted">{{ doc.uploaded_by.name }} · {{ doc.uploaded_at.strftime('%Y-%m-%d') }}</td>
+      <td>
+        <select class="doc-meta" onchange="saveDocMeta({{ doc.id }})" id="doc-lang-{{ doc.id }}">
+          <option value="" {% if not doc.language %}selected{% endif %}>—</option>
+          {% for l in ['en', 'de', 'fr', 'it'] %}
+          <option value="{{ l }}" {% if doc.language == l %}selected{% endif %}>{{ l }}</option>
+          {% endfor %}
+        </select>
+      </td>
+      <td><input type="text" class="doc-meta" id="doc-group-{{ doc.id }}" value="{{ doc.group_label or '' }}"
+                 placeholder="—" onchange="saveDocMeta({{ doc.id }})"></td>
+      {% if is_docx %}
+      <td class="nowrap">
+        <select class="doc-meta" id="doc-conv-{{ doc.id }}" onchange="saveDocConvention({{ doc.id }})">
+          <option value="" {% if not doc.convention %}selected{% endif %}>⚠ —</option>
+          {% for name, label in convention_options %}
+          <option value="{{ name }}" {% if doc.convention == name %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+        <button class="btn btn-small" data-name="{{ doc.display_name }}"
+                onclick="openSetup({{ doc.id }}, this.dataset.name)">{{ T.corpus_setup }}</button>
+      </td>
+      {% endif %}
+      <td>{% if doc.id in analyzed_ids %}<span class="badge badge-ok">{{ T.corpus_analyzed }}</span>{% endif %}</td>
+      <td class="ta-right nowrap">
+        <button class="btn btn-small" onclick="previewDoc({{ doc.id }})">{{ T.corpus_preview_btn }}</button>
+        {% if is_owner %}
+        <button class="btn btn-small btn-danger" onclick="deleteDoc({{ doc.id }})">{{ T.corpus_delete }}</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if is_docx %}
+<div class="overlay" id="modal-setup">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.setup_title }}: <span id="setup-doc-name"></span></div></div>
+      <button class="modal-close" onclick="closeSetupModal()">✕</button>
+    </div>
+    <div class="modal-section">
+      <div class="cards-label">{{ T.setup_sample }}</div>
+      <div id="setup-sample" class="setup-sample"></div>
+    </div>
+    <div class="modal-section">
+      <div class="inline-form">
+        <input type="text" id="setup-regex" placeholder="(?P<speaker>...)  (?P<text>...)  (?P<ts>...)" spellcheck="false" style="flex:2; font-family:monospace">
+        <input type="text" id="setup-name" placeholder="{{ T.setup_conv_name }}" style="max-width:160px">
+        <button class="btn" onclick="suggestRegex()">{{ T.setup_suggest }}</button>
+        <button class="btn btn-primary" onclick="saveConvention()">{{ T.setup_save_conv }}</button>
+      </div>
+    </div>
+    <div class="modal-section">
+      <div class="cards-label">{{ T.setup_roles }}</div>
+      <p class="muted small">{{ T.setup_roles_hint }}</p>
+      <div id="setup-roles"></div>
+      <div class="inline-form" style="margin-top:10px">
+        <button class="btn btn-primary" onclick="saveRoles()">{{ T.setup_save_roles }}</button>
+      </div>
+    </div>
+    <div class="modal-section">
+      <div class="cards-label">{{ T.corpus_paste_title }}</div>
+      <p class="muted small">{{ T.setup_preview_hint }}</p>
+      <textarea id="setup-preview-text" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box"></textarea>
+      <div class="inline-form" style="margin-top:8px">
+        <button class="btn" onclick="previewSegSetup()">{{ T.corpus_preview_btn }}</button>
+      </div>
+      <div id="setup-preview-out"></div>
+    </div>
+    <div id="setup-flash" class="flash" style="display:none;margin-top:1rem"></div>
+  </div>
+</div>
+{% endif %}
+
+{% if is_docx %}
+<div class="overlay" id="conv-help">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.conv_help_title }}</div>
+        <div class="modal-subtitle">{{ T.conv_help_sub }}</div></div>
+      <button class="modal-close" onclick="document.getElementById('conv-help').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.conv_help_what_h }}</h4>
+      <p class="muted small">{{ T.conv_help_what }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.conv_help_detect_h }}</h4>
+      <ul class="modal-list">
+        <li>{{ T.conv_help_d1 }}</li>
+        <li>{{ T.conv_help_d2 }}</li>
+        <li>{{ T.conv_help_d3 }}</li>
+      </ul>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.conv_help_setup_h }}</h4>
+      <ul class="modal-list">
+        <li>{{ T.conv_help_s1 }}</li>
+        <li>{{ T.conv_help_s2 }}</li>
+        <li>{{ T.conv_help_s3 }}</li>
+      </ul>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card" id="doc-preview-card" style="display:none">
+  <div class="page-head">
+    <h2>{{ T.corpus_preview_title }}</h2>
+    <label class="nowrap" style="margin:0">{{ T.corpus_preview_as }}
+      <select id="preview-mode" onchange="rePreview()"></select>
+    </label>
+  </div>
+  <div id="preview-out"></div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+async function deleteDoc(id) {
+  if (!confirm('{{ T.confirm_delete }}')) return;
+  try { await api('DELETE', '/api/documents/' + id); location.reload(); }
+  catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+let sortState = { key: null, asc: true };
+function sortDocs(key) {
+  sortState.asc = sortState.key === key ? !sortState.asc : true;
+  sortState.key = key;
+  const tbody = document.querySelector('#docs-table tbody');
+  [...tbody.querySelectorAll('tr')]
+    .sort((a, b) => {
+      const va = (a.dataset[key] || '').toLowerCase();
+      const vb = (b.dataset[key] || '').toLowerCase();
+      return (va < vb ? -1 : va > vb ? 1 : 0) * (sortState.asc ? 1 : -1);
+    })
+    .forEach(tr => tbody.appendChild(tr));
+}
+document.querySelectorAll('.overlay').forEach(function(el) {
+  el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+});
+setupFilters();
+function highlightRow(id) {
+  document.querySelectorAll('tr.row-highlight').forEach(r => r.classList.remove('row-highlight'));
+  const cb = document.querySelector('.doc-sel[value="' + id + '"]');
+  if (cb) cb.closest('tr').classList.add('row-highlight');
+}
+(function() {
+  const id = sessionStorage.getItem('corpus_highlight');
+  if (id) { highlightRow(id); sessionStorage.removeItem('corpus_highlight'); }
+})();
+async function importBundle() {
+  const input = document.getElementById('bundle-file');
+  if (!input.files.length) return;
+  const btn = document.getElementById('bundle-btn');
+  const flashEl = document.getElementById('bundle-flash');
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  btn.disabled = true;
+  flash(flashEl, '⏳ {{ T.corpus_importing }}', false);
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/corpus/import', form, true);
+    location.reload();
+  } catch (err) {
+    btn.disabled = false;
+    flash(flashEl, err.message, true);
+  }
+}
+async function saveDocMeta(id) {
+  try {
+    await api('PUT', '/api/documents/' + id, {
+      language: document.getElementById('doc-lang-' + id).value,
+      group_label: document.getElementById('doc-group-' + id).value,
+    });
+    highlightRow(id);
+  } catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+async function bulkGroup() {
+  const ids = [...document.querySelectorAll('.doc-sel:checked')].map(c => parseInt(c.value));
+  if (!ids.length) return;
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/documents/bulk-group',
+              { document_ids: ids, group_label: document.getElementById('bulk-group').value });
+    location.reload();
+  } catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+function _fillFilter(sel, values) {
+  if (!sel) return;
+  for (const v of values) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  }
+}
+function setupFilters() {
+  const rows = [...document.querySelectorAll('#docs-table tbody tr')];
+  if (!rows.length) return;
+  const uniq = key => [...new Set(rows.map(r => r.dataset[key]).filter(v => v))].sort();
+  _fillFilter(document.getElementById('filter-lang'), uniq('lang'));
+  _fillFilter(document.getElementById('filter-group'), uniq('group'));
+  _fillFilter(document.getElementById('filter-conv'), uniq('conv'));
+  applyFilters();
+}
+function applyFilters() {
+  const lang = document.getElementById('filter-lang').value;
+  const group = document.getElementById('filter-group').value;
+  const convSel = document.getElementById('filter-conv');
+  const conv = convSel ? convSel.value : '';
+  let shown = 0;
+  const rows = document.querySelectorAll('#docs-table tbody tr');
+  rows.forEach(r => {
+    const ok = (!lang || r.dataset.lang === lang)
+            && (!group || r.dataset.group === group)
+            && (!conv || r.dataset.conv === conv);
+    r.style.display = ok ? '' : 'none';
+    if (ok) shown++;
+  });
+  const count = document.getElementById('filter-count');
+  if (count) count.textContent = shown + ' / ' + rows.length;
+}
+function renderSegments(out, segments, totalLabel) {
+  let html = totalLabel ? '<p class="muted small">' + totalLabel + '</p>' : '';
+  for (const s of segments) {
+    html += '<div class="segment' + (s.excluded ? ' segment-excluded' : '') + '">' +
+      (s.row ? '<span class="seg-time">row ' + s.row + '</span>' : '') +
+      (s.speaker ? '<span class="seg-speaker">' + esc(s.speaker) + '</span>' : '') +
+      (s.timestamp ? '<span class="seg-time">' + esc(s.timestamp) + '</span>' : '') +
+      (s.excluded ? '<span class="badge badge-muted">excluded</span> ' : '') +
+      '<span>' + esc(s.text) + '</span></div>';
+  }
+  out.innerHTML = html;
+}
+const SEG_OPTIONS = {
+  docx: [['utterance_regex', '{{ T.seg_utterance }}'], ['paragraph', '{{ T.seg_paragraph }}'], ['sentence', '{{ T.seg_sentence }}'], ['document', '{{ T.seg_document }}']],
+  excel: [['cell', '{{ T.seg_cell }}'], ['sentence', '{{ T.seg_sentence }}']],
+};
+const INPUT_TYPE = {{ ws.input_type|tojson }};
+function fillModeSelect(id) {
+  const sel = document.getElementById(id);
+  if (sel) sel.innerHTML = SEG_OPTIONS[INPUT_TYPE].map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('');
+}
+fillModeSelect('preview-mode');
+let lastPreviewId = null;
+async function previewDoc(id) {
+  lastPreviewId = id;
+  const card = document.getElementById('doc-preview-card');
+  const out = document.getElementById('preview-out');
+  const mode = document.getElementById('preview-mode').value;
+  card.style.display = '';
+  out.innerHTML = '…';
+  try {
+    const r = await api('GET', '/api/documents/' + id + '/preview-segments?mode=' + encodeURIComponent(mode));
+    renderSegments(out, r.segments, r.total + ' {{ T.corpus_segments }}');
+    card.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) { out.innerHTML = '<p class="flash-error">' + esc(err.message) + '</p>'; }
+}
+function rePreview() { if (lastPreviewId !== null) previewDoc(lastPreviewId); }
+
+{% if ws.input_type == 'excel' %}
+let xlsxData = null;
+async function inspectXlsx() {
+  const input = document.getElementById('xlsx-file');
+  if (!input.files.length) return;
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  try {
+    xlsxData = await api('POST', '/api/workspaces/{{ ws.id }}/excel/inspect', form, true);
+    const sheets = Object.keys(xlsxData.sheets);
+    const sheetSel = document.getElementById('xlsx-sheet');
+    sheetSel.innerHTML = sheets.map(s => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
+    document.getElementById('xlsx-sheet-row').style.display = sheets.length > 1 ? '' : 'none';
+    document.getElementById('xlsx-picker').style.display = '';
+    renderColumns();
+  } catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+function renderColumns() {
+  const sheet = document.getElementById('xlsx-sheet').value;
+  const cols = xlsxData.sheets[sheet] || [];
+  document.getElementById('xlsx-columns').innerHTML = cols.map(c =>
+    '<label class="check-row"><input type="checkbox" class="col-check" value="' + esc(c.name) + '">' +
+    '<span><strong>' + esc(c.name) + '</strong> <span class="muted small">(' + c.n_values + ' {{ T.corpus_excel_values }})</span>' +
+    (c.samples.length ? '<br><span class="muted small">' + esc(c.samples.join(' · ').slice(0, 160)) + '</span>' : '') +
+    '</span></label>').join('');
+  document.getElementById('xlsx-group').innerHTML =
+    '<option value="">{{ T.corpus_excel_group_none }}</option>' +
+    cols.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+}
+async function confirmXlsx() {
+  const columns = [...document.querySelectorAll('.col-check:checked')].map(c => c.value);
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/excel/confirm', {
+      token: xlsxData.token, filename: xlsxData.filename,
+      sheet: document.getElementById('xlsx-sheet').value, columns,
+      group_column: document.getElementById('xlsx-group').value || null,
+    });
+    location.reload();
+  } catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+{% else %}
+async function uploadDocs(e) {
+  e.preventDefault();
+  const files = [...document.getElementById('doc-files').files];
+  if (!files.length) return false;
+  // one request per file: real per-file progress, and no single giant POST that
+  // would time out or spike memory on a large corpus
+  const btn = document.getElementById('upload-btn');
+  const wrap = document.getElementById('upload-progress');
+  const fill = document.getElementById('upload-bar-fill');
+  const label = document.getElementById('upload-bar-label');
+  btn.disabled = true;
+  wrap.style.display = '';
+  let uploaded = 0;
+  const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    const form = new FormData();
+    form.append('files', files[i]);
+    try {
+      const res = await api('POST', '/api/workspaces/{{ ws.id }}/documents', form, true);
+      if (res.uploaded && res.uploaded.length) uploaded += res.uploaded.length;
+      else failed.push(files[i].name);
+    } catch (err) { failed.push(files[i].name); }
+    fill.style.width = Math.round((i + 1) / files.length * 100) + '%';
+    label.textContent = (i + 1) + ' / ' + files.length + ' · ' + uploaded + ' ok'
+      + (failed.length ? ' · ' + failed.length + ' ' + '{{ T.corpus_upload_failed }}' : '');
+  }
+  if (uploaded) { location.reload(); }
+  else {
+    btn.disabled = false;
+    flash(document.getElementById('corpus-flash'),
+          '{{ T.error_generic }}: ' + failed.join(', '), true);
+  }
+  return false;
+}
+let setupDocId = null;
+function closeSetupModal() { document.getElementById('modal-setup').classList.remove('open'); }
+async function previewSegSetup() {
+  const out = document.getElementById('setup-preview-out');
+  const regex = document.getElementById('setup-regex').value.trim();
+  out.innerHTML = '';
+  if (!regex) { out.innerHTML = '<p class="muted small">{{ T.setup_suggest }} a regex first.</p>'; return; }
+  try {
+    const res = await api('POST', '/api/workspaces/{{ ws.id }}/segmentation/preview',
+                          { text: document.getElementById('setup-preview-text').value,
+                            mode: 'utterance_regex', regex });
+    renderSegments(out, res.segments, res.segments.length + ' {{ T.corpus_segments }}');
+  } catch (err) { out.innerHTML = '<p class="flash-error">' + esc(err.message) + '</p>'; }
+}
+async function saveDocConvention(id) {
+  try {
+    await api('PUT', '/api/documents/' + id, {
+      language: document.getElementById('doc-lang-' + id).value,
+      group_label: document.getElementById('doc-group-' + id).value,
+      convention: document.getElementById('doc-conv-' + id).value,
+    });
+    sessionStorage.setItem('corpus_highlight', id);
+    location.reload();
+  } catch (err) { flash(document.getElementById('corpus-flash'), err.message, true); }
+}
+function renderRoles(roles) {
+  const opts = r => ['interviewer', 'participant', 'other'].map(o =>
+    '<option value="' + o + '"' + (o === r ? ' selected' : '') + '>' + o + '</option>').join('');
+  document.getElementById('setup-roles').innerHTML =
+    Object.keys(roles).length
+      ? Object.entries(roles).map(([label, role]) =>
+          '<div class="inline-form"><strong style="min-width:70px">' + esc(label) + '</strong>' +
+          '<select class="role-sel" data-label="' + esc(label) + '">' + opts(role) + '</select></div>').join('')
+      : '<p class="muted small">{{ T.setup_no_roles }}</p>';
+}
+async function openSetup(id, name) {
+  setupDocId = id;
+  highlightRow(id);
+  document.getElementById('setup-doc-name').textContent = name;
+  document.getElementById('setup-sample').innerHTML = '…';
+  document.getElementById('setup-roles').innerHTML = '';
+  document.getElementById('setup-preview-out').innerHTML = '';
+  document.getElementById('setup-regex').value = '';
+  document.getElementById('setup-name').value = '';
+  document.getElementById('modal-setup').classList.add('open');
+  try {
+    const r = await api('GET', '/api/documents/' + id + '/sample');
+    document.getElementById('setup-sample').innerHTML =
+      r.lines.map(l => '<div class="setup-line">' + esc(l) + '</div>').join('');
+    if (r.regex) {
+      document.getElementById('setup-regex').value = r.regex;
+      document.getElementById('setup-name').value = r.convention || '';
+    }
+    renderRoles(r.roles);
+  } catch (err) { flash(document.getElementById('setup-flash'), err.message, true); }
+}
+async function suggestRegex() {
+  try {
+    const r = await api('POST', '/api/documents/' + setupDocId + '/suggest-regex');
+    document.getElementById('setup-regex').value = r.regex;
+  } catch (err) { flash(document.getElementById('setup-flash'), err.message, true); }
+}
+async function saveConvention() {
+  try {
+    await api('POST', '/api/workspaces/{{ ws.id }}/conventions', {
+      name: document.getElementById('setup-name').value,
+      regex: document.getElementById('setup-regex').value,
+      apply_to_document_id: setupDocId,
+    });
+    sessionStorage.setItem('corpus_highlight', setupDocId);
+    location.reload();
+  } catch (err) { flash(document.getElementById('setup-flash'), err.message, true); }
+}
+async function saveRoles() {
+  const roles = {};
+  document.querySelectorAll('.role-sel').forEach(s => { roles[s.dataset.label] = s.value; });
+  try {
+    await api('PUT', '/api/documents/' + setupDocId + '/roles', { roles });
+    closeSetupModal();
+    highlightRow(setupDocId);
+  } catch (err) { flash(document.getElementById('setup-flash'), err.message, true); }
+}
+{% endif %}
+</script>
+{% endblock %}

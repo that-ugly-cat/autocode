@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{ T.login_page_title }}</title>
+  <link rel="icon" type="image/png" href="/imgs/favicon.png">
+  <link rel="stylesheet" href="/static/css/style.css?v=14">
+  <style>
+    body { min-height: 100vh; display: flex; }
+
+    .landing {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 4rem 4rem;
+      border-right: 1px solid var(--border);
+      min-width: 0;
+    }
+    .logo { margin-bottom: 1.2rem; }
+    .logo img { height: 80px; width: auto; }
+    .tagline {
+      font-size: 1rem; color: var(--muted); line-height: 1.75;
+      margin: 0 0 2.5rem; max-width: 600px;
+    }
+    .cards-label {
+      font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.1em; color: var(--muted-3); margin-bottom: 1rem;
+    }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.8rem; margin-bottom: 2.5rem; max-width: 1080px; }
+    .feature-card {
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 1.2rem 1.1rem; cursor: pointer; user-select: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .feature-card:hover { border-color: var(--accent); background: var(--card-hover); }
+    .feature-card .card-icon { font-size: 1.4rem; margin-bottom: 0.55rem; }
+    .feature-card h3 { font-size: 0.85rem; font-weight: 700; color: var(--text); margin: 0 0 0.35rem; }
+    .feature-card p { font-size: 0.76rem; color: var(--muted-2); line-height: 1.55; margin: 0; }
+    .feature-card .more { font-size: 0.7rem; color: var(--accent); margin-top: 0.6rem; }
+    .credits { font-size: 0.72rem; color: var(--muted-3); line-height: 1.6; }
+    .credits a { color: var(--accent); text-decoration: none; }
+    .credits a:hover { color: var(--accent-light); }
+
+    .login-panel {
+      width: 360px; flex-shrink: 0; display: flex;
+      align-items: center; justify-content: center; padding: 2.5rem;
+    }
+    .login-card { width: 100%; }
+    .login-card .card-title { font-size: 1.1rem; font-weight: 700; color: #fff; margin-bottom: 0.3rem; }
+    .login-card .card-sub { font-size: 0.78rem; color: var(--muted-2); margin-bottom: 1.4rem; }
+    .auth-tabs { margin: 0 0 0.6rem; }
+    .login-card form input { margin-bottom: 10px; }
+    .login-card form .btn { width: 100%; margin-top: 4px; }
+
+    .overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+      z-index: 200; align-items: center; justify-content: center; padding: 1.5rem;
+    }
+    .overlay.open { display: flex; }
+    .modal {
+      background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 2rem; width: 100%; max-width: 520px; max-height: 85vh; overflow-y: auto;
+    }
+    .modal-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.4rem; }
+    .modal-icon { font-size: 1.6rem; margin-right: 0.8rem; flex-shrink: 0; }
+    .modal-title { font-size: 1.05rem; font-weight: 700; color: #fff; margin-bottom: 0.2rem; }
+    .modal-subtitle { font-size: 0.78rem; color: var(--muted-2); }
+    .modal-close {
+      background: none; border: none; color: var(--muted-3); font-size: 1.2rem;
+      cursor: pointer; padding: 0; line-height: 1; flex-shrink: 0;
+    }
+    .modal-close:hover { color: var(--muted); }
+    .modal-section { margin-bottom: 1.2rem; }
+    .modal-section h4 {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted-3); margin: 0 0 0.6rem;
+    }
+    .modal-list { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; margin: 0; padding: 0; }
+    .modal-list li {
+      font-size: 0.82rem; color: var(--muted); line-height: 1.55;
+      padding-left: 1.1rem; position: relative;
+    }
+    .modal-list li::before { content: '→'; position: absolute; left: 0; color: var(--accent); font-size: 0.78rem; }
+
+    @media (max-width: 1000px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 800px) {
+      body { flex-direction: column; }
+      .landing { border-right: none; border-bottom: 1px solid var(--border); padding: 2.5rem 1.5rem; }
+      .login-panel { width: 100%; padding: 2rem 1.5rem; }
+      .cards { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 480px) { .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+
+  <!-- Landing -->
+  <div class="landing">
+    <div class="logo"><img src="/imgs/logo.png" alt="AutoCode"></div>
+    <p class="tagline">{{ T.login_tagline }}</p>
+
+    <div class="cards-label">{{ T.login_what_you_can }}</div>
+    <div class="cards">
+      <div class="feature-card" onclick="openModal('modal-llm')">
+        <div class="card-icon">🤖</div>
+        <h3>{{ T.card_llm_title }}</h3>
+        <p>{{ T.card_llm_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+      <div class="feature-card" onclick="openModal('modal-nlp')">
+        <div class="card-icon">🔍</div>
+        <h3>{{ T.card_nlp_title }}</h3>
+        <p>{{ T.card_nlp_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+      <div class="feature-card" onclick="openModal('modal-codebook')">
+        <div class="card-icon">📚</div>
+        <h3>{{ T.card_codebook_title }}</h3>
+        <p>{{ T.card_codebook_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+      <div class="feature-card" onclick="openModal('modal-ws')">
+        <div class="card-icon">👥</div>
+        <h3>{{ T.card_ws_title }}</h3>
+        <p>{{ T.card_ws_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+      <div class="feature-card" onclick="openModal('modal-export')">
+        <div class="card-icon">📦</div>
+        <h3>{{ T.card_export_title }}</h3>
+        <p>{{ T.card_export_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+      <div class="feature-card" onclick="openModal('modal-security')">
+        <div class="card-icon">🔒</div>
+        <h3>{{ T.card_security_title }}</h3>
+        <p>{{ T.card_security_desc }}</p>
+        <div class="more">{{ T.login_learn_more }}</div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:1rem">
+      <a href="/guide" target="_blank" rel="noopener"
+         style="font-size:0.82rem;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:5px;padding:0.3rem 0.75rem;display:inline-block">
+        {{ T.guide_btn }} →
+      </a>
+    </div>
+    <div class="credits">
+      {{ T.credits_pre }} <a href="https://www.ibme.uzh.ch/en/Biomedical-Ethics/Team/Research-Fellows/Giovanni-Spitale.html" target="_blank">Giovanni Spitale</a>
+      {{ T.credits_post }}
+    </div>
+  </div>
+
+  <!-- Login / Register -->
+  <div class="login-panel">
+    <div class="login-card">
+      <div class="card-title">{{ T.login_title }}</div>
+      <div class="card-sub">{{ T.login_sub }}</div>
+
+      <div class="tabs auth-tabs">
+        <button id="tab-login" class="active" onclick="showTab('login')">{{ T.auth_tab_login }}</button>
+        <button id="tab-register" onclick="showTab('register')">{{ T.auth_tab_register }}</button>
+      </div>
+
+      <form id="form-login" onsubmit="return doLogin(event)">
+        <input type="email" id="login-email" placeholder="{{ T.ph_email }}" autocomplete="email" required autofocus>
+        <input type="password" id="login-password" placeholder="{{ T.ph_password }}" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary">{{ T.login_submit }}</button>
+      </form>
+
+      <form id="form-register" style="display:none" onsubmit="return doRegister(event)">
+        <input type="text" id="reg-name" placeholder="{{ T.ph_name }}" required>
+        <input type="email" id="reg-email" placeholder="{{ T.ph_email }}" required>
+        <input type="password" id="reg-password" placeholder="{{ T.ph_password }}" required minlength="8">
+        <input type="password" id="reg-confirm" placeholder="{{ T.ph_confirm_pwd }}" required>
+        <button type="submit" class="btn btn-primary">{{ T.register_submit }}</button>
+      </form>
+
+      <div id="auth-flash" class="flash" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- Modals -->
+  <div class="overlay" id="modal-llm">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">🤖</div>
+          <div>
+            <div class="modal-title">{{ T.modal_coding_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_coding_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-llm')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_coding_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_coding_l1 }}</li>
+          <li>{{ T.modal_coding_l2 }}</li>
+          <li>{{ T.modal_coding_l3 }}</li>
+          <li>{{ T.modal_coding_l4 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_coding_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_coding_m1 }}</li>
+          <li>{{ T.modal_coding_m2 }}</li>
+          <li>{{ T.modal_coding_m3 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-nlp">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">🔍</div>
+          <div>
+            <div class="modal-title">{{ T.modal_nlp_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_nlp_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-nlp')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_nlp_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_nlp_l1 }}</li>
+          <li>{{ T.modal_nlp_l2 }}</li>
+          <li>{{ T.modal_nlp_l3 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_nlp_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_nlp_m1 }}</li>
+          <li>{{ T.modal_nlp_m2 }}</li>
+          <li>{{ T.modal_nlp_m3 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-codebook">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">📚</div>
+          <div>
+            <div class="modal-title">{{ T.modal_codebook_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_codebook_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-codebook')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_codebook_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_codebook_l1 }}</li>
+          <li>{{ T.modal_codebook_l2 }}</li>
+          <li>{{ T.modal_codebook_l3 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_codebook_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_codebook_m1 }}</li>
+          <li>{{ T.modal_codebook_m2 }}</li>
+          <li>{{ T.modal_codebook_m3 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-ws">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">👥</div>
+          <div>
+            <div class="modal-title">{{ T.modal_ws_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_ws_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-ws')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_ws_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_ws_l1 }}</li>
+          <li>{{ T.modal_ws_l2 }}</li>
+          <li>{{ T.modal_ws_l3 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_ws_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_ws_m1 }}</li>
+          <li>{{ T.modal_ws_m2 }}</li>
+          <li>{{ T.modal_ws_m3 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-security">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">🔒</div>
+          <div>
+            <div class="modal-title">{{ T.modal_security_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_security_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-security')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_security_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_security_l1 }}</li>
+          <li>{{ T.modal_security_l2 }}</li>
+          <li>{{ T.modal_security_l3 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_security_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_security_m1 }}</li>
+          <li>{{ T.modal_security_m2 }}</li>
+          <li>{{ T.modal_security_m3 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-export">
+    <div class="modal">
+      <div class="modal-header">
+        <div style="display:flex;align-items:flex-start">
+          <div class="modal-icon">📦</div>
+          <div>
+            <div class="modal-title">{{ T.modal_export_title }}</div>
+            <div class="modal-subtitle">{{ T.modal_export_sub }}</div>
+          </div>
+        </div>
+        <button class="modal-close" onclick="closeModal('modal-export')">✕</button>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_export_h1 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_export_l1 }}</li>
+          <li>{{ T.modal_export_l2 }}</li>
+          <li>{{ T.modal_export_l3 }}</li>
+        </ul>
+      </div>
+      <div class="modal-section">
+        <h4>{{ T.modal_export_h2 }}</h4>
+        <ul class="modal-list">
+          <li>{{ T.modal_export_m1 }}</li>
+          <li>{{ T.modal_export_m2 }}</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function openModal(id)  { document.getElementById(id).classList.add('open'); }
+    function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+    document.querySelectorAll('.overlay').forEach(function(el) {
+      el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+    });
+
+    async function api(method, url, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const r = await fetch(url, opts);
+      let data = {};
+      try { data = await r.json(); } catch (e) {}
+      if (!r.ok) throw new Error(data.detail || '{{ T.error_generic }}');
+      return data;
+    }
+    function flash(el, msg) {
+      el.textContent = msg;
+      el.className = 'flash flash-error';
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 4000);
+    }
+    function showTab(which) {
+      document.getElementById('form-login').style.display = which === 'login' ? '' : 'none';
+      document.getElementById('form-register').style.display = which === 'register' ? '' : 'none';
+      document.getElementById('tab-login').classList.toggle('active', which === 'login');
+      document.getElementById('tab-register').classList.toggle('active', which === 'register');
+    }
+    async function doLogin(e) {
+      e.preventDefault();
+      try {
+        await api('POST', '/api/auth/login', {
+          email: document.getElementById('login-email').value,
+          password: document.getElementById('login-password').value,
+        });
+        location.href = '/2fa';  // password ok → 2FA second step
+      } catch (err) { flash(document.getElementById('auth-flash'), '{{ T.err_invalid_login }}'); }
+      return false;
+    }
+    async function doRegister(e) {
+      e.preventDefault();
+      const pwd = document.getElementById('reg-password').value;
+      if (pwd !== document.getElementById('reg-confirm').value) {
+        flash(document.getElementById('auth-flash'), '{{ T.err_pwd_mismatch }}');
+        return false;
+      }
+      try {
+        await api('POST', '/api/auth/register', {
+          name: document.getElementById('reg-name').value,
+          email: document.getElementById('reg-email').value,
+          password: pwd,
+        });
+        location.href = '/2fa';  // mandatory 2FA enrollment
+      } catch (err) { flash(document.getElementById('auth-flash'), err.message); }
+      return false;
+    }
+  </script>
+
+</body>
+</html>

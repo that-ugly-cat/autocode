@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ ws.name }} · {{ T.tab_runs }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'runs' %}
+{% include "_ws_tabs.html" %}
+
+<div class="page-head">
+  <h2>{{ T.runs_title }}</h2>
+  <button class="btn btn-primary" onclick="toggleNew()">{{ T.runs_new }}</button>
+</div>
+
+<div id="new-run" class="card" style="display:none">
+  <label>{{ T.runs_engine }}
+    <select id="run-engine" onchange="engineChanged()">
+      <option value="llm">{{ T.engine_llm }}</option>
+      <option value="dictionary">{{ T.engine_dictionary }}</option>
+    </select>
+  </label>
+
+  {% if docs_unsegmented %}
+  <p><span class="badge badge-warn">{{ T.runs_unsegmented.format(n=docs_unsegmented) }}</span></p>
+  {% endif %}
+  <div id="llm-warnings">
+    {% if not has_api_key %}
+    <p><span class="badge badge-warn">{{ T.runs_no_key }}</span></p>
+    {% endif %}
+    {% if not (ws.study_context or '')|trim %}
+    <p><span class="badge badge-warn">{{ T.runs_no_study_context }}</span>
+       {% if is_owner %}<a href="/workspace/{{ ws.id }}/settings">{{ T.tab_settings }} →</a>{% endif %}</p>
+    {% endif %}
+    {% if n_codes == 0 %}
+    <p><span class="badge badge-warn">{{ T.runs_empty_codebook_llm }}</span></p>
+    {% endif %}
+  </div>
+  <div id="dict-warnings" style="display:none">
+    {% if not has_expressions %}
+    <p><span class="badge badge-warn">{{ T.runs_empty_codebook_dict }}</span>
+       <a href="/workspace/{{ ws.id }}/codebook">{{ T.tab_codebook }} →</a></p>
+    {% endif %}
+    {% for w in dict_warnings %}
+    <p><span class="badge badge-warn">{{ T.runs_dict_coverage.format(n=w.n, lang=w.lang) }}</span></p>
+    {% endfor %}
+    {% if docs_without_lang %}
+    <p><span class="badge badge-warn">{{ T.runs_dict_no_lang.format(n=docs_without_lang) }}</span></p>
+    {% endif %}
+  </div>
+  <h2>{{ T.runs_documents }}</h2>
+  {% if not ws.documents %}
+  <p class="muted">{{ T.corpus_empty }}</p>
+  {% else %}
+  <label class="check-row"><input type="checkbox" id="select-all" onchange="toggleAll(this)"> {{ T.runs_select_all }}</label>
+  {% for doc in ws.documents %}
+  <label class="check-row">
+    <input type="checkbox" class="doc-check" value="{{ doc.id }}">
+    {{ doc.display_name }}
+    {% if doc.id in analyzed_ids %}<span class="badge badge-ok">{{ T.corpus_analyzed }}</span>{% endif %}
+  </label>
+  {% endfor %}
+  {% endif %}
+
+  <label>{{ T.runs_unit }} <button type="button" class="btn btn-small" onclick="document.getElementById('help-seg').classList.add('open')">?</button>
+    <select id="run-unit" onchange="unitChanged()"></select>
+  </label>
+
+  {% if ws.input_type != 'excel' %}
+  <div id="exclude-roles-block">
+    <div class="cards-label">{{ T.runs_exclude_roles }}</div>
+    <p class="muted small">{{ T.runs_exclude_hint }}</p>
+    {% for role in ['interviewer', 'participant', 'other'] %}
+    <label class="check-row"><input type="checkbox" class="run-excl" value="{{ role }}"> {{ role }}</label>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="run-params" id="llm-params">
+    {% if ws.input_type != 'excel' %}
+    <label id="row-ctx">{{ T.runs_context_window }}
+      <input type="number" id="run-ctx" value="3" min="0" max="20">
+    </label>
+    {% endif %}
+    <label>{{ T.runs_model }}
+      <select id="run-model">
+        {% for m in models %}<option value="{{ m }}" {% if m == 'claude-sonnet-4-6' %}selected{% endif %}>{{ m }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ T.runs_max_workers }}
+      <input type="number" id="run-workers" value="5" min="1" max="10">
+    </label>
+  </div>
+
+  <div class="inline-form">
+    <button id="btn-estimate" class="btn" onclick="estimate()" {% if not has_api_key %}disabled{% endif %}>{{ T.runs_estimate }}</button>
+    <button id="btn-start" class="btn btn-primary" onclick="startRun()" {% if not has_api_key %}disabled{% endif %}>{{ T.runs_start }}</button>
+  </div>
+  <p id="estimate-out" class="muted"></p>
+  <div id="run-flash" class="flash" style="display:none"></div>
+</div>
+
+{% if not runs %}
+<p class="muted">{{ T.runs_empty }}</p>
+{% else %}
+<table class="table">
+  <thead><tr><th>#</th><th>{{ T.run_doc_status }}</th><th>{{ T.runs_model }}</th><th>Docs</th><th>{{ T.run_cost }}</th><th>{{ T.runs_started_by }}</th></tr></thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td><a href="/workspace/{{ ws.id }}/runs/{{ run.id }}">#{{ run.id }}</a></td>
+      <td><span class="badge status-{{ run.status }}">{{ T['run_status_' + run.status] }}</span></td>
+      <td class="muted">{{ run.engine if run.engine == 'dictionary' else run.model }} · {{ run.granularity }}</td>
+      <td>{{ run.run_documents|length }}</td>
+      <td>${{ '%.4f'|format(run.cost_usd or 0) }}</td>
+      <td class="muted">{{ run.created_by.name }} · {{ run.started_at.strftime('%Y-%m-%d %H:%M') if run.started_at else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<div class="overlay" id="help-seg">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.help_seg_title }}</div>
+        <div class="modal-subtitle">{{ T.help_seg_sub }}</div></div>
+      <button class="modal-close" onclick="document.getElementById('help-seg').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <ul class="modal-list">
+        <li><strong>{{ T.seg_utterance }}</strong> — {{ T.help_seg_utterance }}</li>
+        <li><strong>{{ T.seg_paragraph }}</strong> — {{ T.help_seg_paragraph }}</li>
+        <li><strong>{{ T.seg_sentence }}</strong> — {{ T.help_seg_sentence }}</li>
+        <li><strong>{{ T.seg_document }}</strong> — {{ T.help_seg_document }}</li>
+        <li><strong>{{ T.seg_cell }}</strong> — {{ T.help_seg_cell }}</li>
+      </ul>
+    </div>
+    <div class="modal-section">
+      <p class="muted small">{{ T.help_seg_note }}</p>
+      <p class="muted small">{{ T.help_seg_exclusion }}</p>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="llm-consent">
+  <div class="modal">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.consent_title }}</div>
+        <div class="modal-subtitle">{{ T.consent_sub }}</div></div>
+      <button class="modal-close" onclick="document.getElementById('llm-consent').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <ul class="modal-list">
+        <li>{{ T.consent_l1 }}</li>
+        <li>{{ T.consent_l2 }}</li>
+        <li>{{ T.consent_l3 }}</li>
+      </ul>
+    </div>
+    <div class="inline-form">
+      <button class="btn btn-primary" onclick="doStartRun()">{{ T.consent_confirm }}</button>
+      <button class="btn" onclick="document.getElementById('llm-consent').classList.remove('open')">{{ T.cb_cancel }}</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function toggleNew() {
+  const el = document.getElementById('new-run');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+function toggleAll(cb) {
+  document.querySelectorAll('.doc-check').forEach(c => { c.checked = cb.checked; });
+}
+const HAS_KEY = {{ 'true' if has_api_key else 'false' }};
+const INPUT_TYPE = {{ ws.input_type|tojson }};
+const SEG_OPTIONS = {
+  docx: [['utterance_regex', '{{ T.seg_utterance }}'], ['paragraph', '{{ T.seg_paragraph }}'], ['sentence', '{{ T.seg_sentence }}'], ['document', '{{ T.seg_document }}']],
+  excel: [['cell', '{{ T.seg_cell }}'], ['sentence', '{{ T.seg_sentence }}']],
+};
+function initUnit() {
+  const sel = document.getElementById('run-unit');
+  sel.innerHTML = SEG_OPTIONS[INPUT_TYPE].map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('');
+  unitChanged();
+}
+function unitChanged() {
+  const unit = document.getElementById('run-unit').value;
+  // context window is meaningless for whole-document units; role exclusion needs a
+  // speaker structure (any docx mode except document)
+  const ctxRow = document.getElementById('row-ctx');
+  if (ctxRow) ctxRow.style.display = unit === 'document' ? 'none' : '';
+  const exclBlock = document.getElementById('exclude-roles-block');
+  if (exclBlock) exclBlock.style.display = unit === 'document' ? 'none' : '';
+}
+function engineChanged() {
+  const isDict = document.getElementById('run-engine').value === 'dictionary';
+  document.getElementById('llm-params').style.display = isDict ? 'none' : '';
+  document.getElementById('llm-warnings').style.display = isDict ? 'none' : '';
+  document.getElementById('dict-warnings').style.display = isDict ? '' : 'none';
+  document.getElementById('btn-estimate').disabled = !isDict && !HAS_KEY;
+  document.getElementById('btn-start').disabled = !isDict && !HAS_KEY;
+}
+function params() {
+  const ctx = document.getElementById('run-ctx');
+  const unit = document.getElementById('run-unit').value;
+  const isDict = document.getElementById('run-engine').value === 'dictionary';
+  const noCtx = isDict || unit === 'document';
+  return {
+    document_ids: [...document.querySelectorAll('.doc-check:checked')].map(c => parseInt(c.value)),
+    unit: unit,
+    engine: document.getElementById('run-engine').value,
+    context_window: (ctx && !noCtx) ? (parseInt(ctx.value) || 0) : 0,
+    model: document.getElementById('run-model').value,
+    excluded_roles: [...document.querySelectorAll('.run-excl:checked')].map(c => c.value),
+  };
+}
+initUnit();
+function estimateBody() {
+  const body = params();
+  body.max_workers = parseInt(document.getElementById('run-workers').value) || 5;
+  return body;
+}
+async function estimate() {
+  const out = document.getElementById('estimate-out');
+  out.textContent = '…';
+  try {
+    const r = await api('POST', '/api/workspaces/{{ ws.id }}/runs/estimate', estimateBody());
+    let txt = '{{ T.runs_estimate_result }}'
+      .replace('{segments}', r.segments).replace('{input_tokens}', r.input_tokens)
+      .replace('{output_tokens}', r.output_tokens).replace('{cost}', r.cost_usd);
+    if (r.eta_seconds) txt += ' · ~' + fmtDuration(r.eta_seconds) + ' {{ T.runs_eta }}';
+    out.textContent = txt;
+  } catch (err) { out.textContent = ''; flash(document.getElementById('run-flash'), err.message, true); }
+}
+function startRun() {
+  // LLM sends excerpts to an external service: gate the launch behind an explicit
+  // data-protection consent. The dictionary engine is local — start straight away.
+  if (document.getElementById('run-engine').value === 'llm') {
+    document.getElementById('llm-consent').classList.add('open');
+  } else {
+    doStartRun();
+  }
+}
+async function doStartRun() {
+  document.getElementById('llm-consent').classList.remove('open');
+  try {
+    const r = await api('POST', '/api/workspaces/{{ ws.id }}/runs', estimateBody());
+    location.href = '/workspace/{{ ws.id }}/runs/' + r.id;
+  } catch (err) { flash(document.getElementById('run-flash'), err.message, true); }
+}
+document.querySelectorAll('.overlay').forEach(function(el) {
+  el.addEventListener('click', function(e) { if (e.target === el) el.classList.remove('open'); });
+});
+</script>
+{% endblock %}

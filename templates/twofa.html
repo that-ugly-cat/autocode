@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}{{ T.tfa_title }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+<div style="max-width:460px; margin:48px auto;">
+  <div class="card">
+    {% if enrolled %}
+    <h2>{{ T.tfa_verify_title }}</h2>
+    <p class="muted small">{{ T.tfa_verify_hint }}</p>
+    <form id="tfa-form" onsubmit="return doVerify(event)">
+      <input type="text" id="tfa-code" inputmode="numeric" autocomplete="one-time-code"
+             placeholder="123456" required autofocus>
+      <button type="submit" class="btn btn-primary">{{ T.tfa_verify_btn }}</button>
+    </form>
+    <p class="muted small" style="margin-top:10px">{{ T.tfa_backup_use }}</p>
+    {% else %}
+    <h2>{{ T.tfa_setup_title }}</h2>
+    <p class="muted small">{{ T.tfa_setup_hint }}</p>
+    <div id="qr-box" style="text-align:center; margin:14px 0"></div>
+    <p class="muted small">{{ T.tfa_setup_manual }} <code id="tfa-secret">…</code></p>
+    <form id="tfa-form" onsubmit="return doConfirm(event)">
+      <input type="text" id="tfa-code" inputmode="numeric" placeholder="123456" required>
+      <button type="submit" class="btn btn-primary">{{ T.tfa_setup_confirm }}</button>
+    </form>
+    {% endif %}
+    <div id="tfa-flash" class="flash" style="display:none"></div>
+
+    <div id="backup-box" style="display:none; margin-top:14px">
+      <h3>{{ T.tfa_backup_title }}</h3>
+      <p class="muted small">{{ T.tfa_backup_hint }}</p>
+      <pre id="backup-codes" class="backup-codes"></pre>
+      <button class="btn btn-primary" onclick="location.href='/'">{{ T.tfa_backup_done }}</button>
+    </div>
+  </div>
+  <p class="muted small" style="text-align:center"><button class="btn-link" onclick="logout()">{{ T.logout_btn }}</button></p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+{% if not enrolled %}
+(async function () {
+  try {
+    const r = await api('POST', '/api/auth/2fa/setup');
+    document.getElementById('tfa-secret').textContent = r.secret;
+    if (r.qr) document.getElementById('qr-box').innerHTML =
+      '<img alt="QR" style="max-width:200px;border-radius:8px" src="' + r.qr + '">';
+  } catch (e) { flash(document.getElementById('tfa-flash'), e.message, true); }
+})();
+async function doConfirm(e) {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/api/auth/2fa/setup/confirm',
+                        { code: document.getElementById('tfa-code').value });
+    showBackup(r.backup_codes);
+  } catch (err) { flash(document.getElementById('tfa-flash'), err.message, true); }
+  return false;
+}
+function showBackup(codes) {
+  document.getElementById('tfa-form').style.display = 'none';
+  document.getElementById('backup-codes').textContent = (codes || []).join('\n');
+  document.getElementById('backup-box').style.display = '';
+}
+{% else %}
+async function doVerify(e) {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/auth/2fa/verify', { code: document.getElementById('tfa-code').value });
+    location.href = '/';
+  } catch (err) { flash(document.getElementById('tfa-flash'), err.message, true); }
+  return false;
+}
+{% endif %}
+</script>
+{% endblock %}

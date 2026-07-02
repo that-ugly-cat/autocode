@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+sqlalchemy
+bcrypt
+python-jose[cryptography]
+cryptography
+pandas
+openpyxl
+python-docx
+anthropic
+spacy
+langdetect
+markdown
+matplotlib
+qrcode[pil]

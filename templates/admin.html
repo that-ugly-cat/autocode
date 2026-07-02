@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block nav_admin %}active{% endblock %}
+{% block title %}{{ T.adm_title }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+<h1>{{ T.adm_title }}</h1>
+
+<div class="card">
+  <h2>{{ T.adm_users }}</h2>
+  <table class="table">
+    <thead><tr><th>Name</th><th>Email</th><th></th><th>{{ T.adm_total_cost }}</th><th></th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.name }} {% if u.is_admin %}<span class="badge">admin</span>{% endif %}</td>
+        <td class="muted">{{ u.email }}</td>
+        <td>
+          {% if u.is_active %}<span class="badge badge-ok">{{ T.adm_active }}</span>
+          {% else %}<span class="badge badge-warn">{{ T.adm_disabled }}</span>{% endif %}
+        </td>
+        <td>${{ '%.4f'|format(costs[u.id]) }}</td>
+        <td class="ta-right nowrap">
+          <button class="btn btn-small" onclick="reset2fa({{ u.id }})">{{ T.adm_reset_2fa }}</button>
+          {% if u.id != user.id %}
+          <button class="btn btn-small" onclick="toggleUser({{ u.id }})">{{ T.adm_toggle }}</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div id="adm-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card">
+  <h2>{{ T.adm_workspaces }}</h2>
+  <table class="table">
+    <thead><tr><th>Name</th><th>{{ T.ws_owner }}</th><th>Docs</th><th>Members</th><th></th></tr></thead>
+    <tbody>
+      {% for ws in workspaces %}
+      <tr>
+        <td><a href="/workspace/{{ ws.id }}">{{ ws.name }}</a></td>
+        <td class="muted">{{ ws.owner.name }}</td>
+        <td>{{ ws.documents|length }}</td>
+        <td>{{ ws.members|length }}</td>
+        <td class="muted">{{ ws.created_at.strftime('%Y-%m-%d') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function toggleUser(id) {
+  try { await api('POST', '/api/admin/users/' + id + '/toggle-active'); location.reload(); }
+  catch (err) { flash(document.getElementById('adm-flash'), err.message, true); }
+}
+async function reset2fa(id) {
+  if (!confirm('{{ T.adm_reset_2fa_confirm }}')) return;
+  try {
+    await api('POST', '/api/admin/users/' + id + '/reset-2fa');
+    flash(document.getElementById('adm-flash'), '{{ T.saved }}', false);
+  } catch (err) { flash(document.getElementById('adm-flash'), err.message, true); }
+}
+</script>
+{% endblock %}

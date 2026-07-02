@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ ws.name }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'overview' %}
+{% include "_ws_tabs.html" %}
+
+<div class="stat-grid">
+  <a class="stat-card" href="/workspace/{{ ws.id }}/corpus">
+    <div class="stat-num">{{ n_documents }}</div>
+    <div class="stat-label">{{ T.ov_documents }}</div>
+    <div class="type-badge">{{ ws.input_type }}</div>
+  </a>
+  <a class="stat-card" href="/workspace/{{ ws.id }}/corpus">
+    <div class="stat-num">{{ n_groups }}</div>
+    <div class="stat-label">{{ T.ov_groups }}</div>
+  </a>
+  <a class="stat-card" href="/workspace/{{ ws.id }}/codebook">
+    <div class="stat-num">{{ n_codes }}</div>
+    <div class="stat-label">{{ T.ov_codes }}</div>
+  </a>
+  <div class="stat-card">
+    <div class="stat-num">{{ n_members }}</div>
+    <div class="stat-label">{{ T.ov_members }}</div>
+  </div>
+  <a class="stat-card" href="/workspace/{{ ws.id }}/runs">
+    <div class="stat-num">{{ n_runs }}</div>
+    <div class="stat-label">{{ T.ov_runs }}</div>
+  </a>
+</div>
+
+<div class="ov-members-card">
+  <div class="ov-members-title">{{ T.ov_members }}</div>
+  {% for m in members %}
+  <div class="ov-member-row">
+    <span class="ov-member-name">{{ m.name }}</span>
+    <span class="ov-member-email">{{ m.email }}</span>
+    {% if m.is_owner %}<span class="ov-member-tag">{{ T.ov_owner }}</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block nav_ws %}active{% endblock %}
+{% block title %}{{ code.label }} — {{ T.app_name }}{% endblock %}
+{% block body %}
+{% set active_tab = 'codebook' %}
+{% include "_ws_tabs.html" %}
+
+<div class="page-head">
+  <h2>{{ code.label }}
+    {% if code.is_model_proposed %}<span class="badge badge-model">{{ T.cb_model_badge }}</span>{% endif %}
+  </h2>
+  <a class="btn" href="/workspace/{{ ws.id }}/codebook">← {{ T.cb_title }}</a>
+</div>
+{% if code.description %}<p class="muted">{{ code.description }}</p>{% endif %}
+{% if code.example %}<p class="muted small"><em>{{ T.cb_example }}:</em> {{ code.example }}</p>{% endif %}
+
+<div class="inline-form">
+  <label class="nowrap" style="margin:0">{{ T.ext_filter_run }}
+    <select onchange="location.href = this.value">
+      <option value="/workspace/{{ ws.id }}/codes/{{ code.id }}" {% if not selected_run %}selected{% endif %}>{{ T.ext_all_runs }}</option>
+      {% for r in runs_with_code %}
+      <option value="/workspace/{{ ws.id }}/codes/{{ code.id }}?run_id={{ r.id }}" {% if selected_run == r.id %}selected{% endif %}>Run #{{ r.id }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <span class="muted">{{ n_extracts }} {{ T.ext_count }}</span>
+</div>
+
+{% if not by_doc %}
+<p class="muted">{{ T.ext_empty }}</p>
+{% endif %}
+
+{% for doc, items in by_doc.items() %}
+<div class="card">
+  <h2>{{ doc.display_name }}</h2>
+  {% for c in items %}
+  <div class="segment">
+    {% if c.row_index %}<span class="seg-time">row {{ c.row_index }}</span>{% endif %}
+    <span>{{ c.segment_text }}</span>
+    {% if c.rationale %}<div class="muted small rationale">{{ T.ext_rationale }}: {{ c.rationale }}</div>{% endif %}
+    <div class="muted small">Run #{{ c.run_id }}{% if c.relevance_score %} · {{ T.ext_score }}: {{ c.relevance_score }}{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endfor %}
+{% endblock %}
