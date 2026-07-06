@@ -49,7 +49,7 @@ hardware.
 Example **Caddy**:
 
 ```
-autocode.example.org {
+yourdomain.example {
     reverse_proxy 127.0.0.1:8007
 }
 ```
@@ -58,8 +58,8 @@ Reload after editing: `systemctl reload caddy`.
 
 ## 5. Verify
 
-- `https://autocode.example.org/login` — auth (2FA enrollment forced on first login)
-- `https://autocode.example.org/` — workspace list
+- `https://yourdomain.example/login` — auth (2FA enrollment forced on first login)
+- `https://yourdomain.example/` — workspace list
 
 ## 6. Updating
 
