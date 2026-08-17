@@ -43,6 +43,7 @@ def export_xlsx_bytes(run: Run, db) -> bytes:
         "speaker": c.speaker or "",
         "segment_text": c.segment_text,
         "code": c.code.label,
+        "code_cluster": c.code.cluster or "",   # pivot the codings sheet by family
         "rationale": c.rationale or "",
         "matched_expressions": ("; ".join(json.loads(c.matched_expressions))
                                 if c.matched_expressions else ""),
@@ -132,7 +133,8 @@ def export_analysis_bytes(data: dict) -> bytes:
             rows = []
             for r in g["rows"]:
                 for grp in g["groups"]:
-                    rows.append({"code": r["label"], "group": grp or "(no group)",
+                    rows.append({"code": r["label"], "cluster": r.get("cluster", ""),
+                                 "group": grp or "(no group)",
                                  "pct_units_coded": r["pct"][grp],
                                  "deviation_from_mean": r["deviation"][grp],
                                  "cross_group_mean": r["mean"]})
@@ -142,6 +144,25 @@ def export_analysis_bytes(data: dict) -> bytes:
         if c["labels"]:
             pd.DataFrame(c["matrix"], index=c["labels"], columns=c["labels"]) \
                 .to_excel(writer, sheet_name="cooccurrence")
+
+        # cluster blocks: absent entirely when no code in the workspace has one
+        if data.get("clusters"):
+            pd.DataFrame(data["clusters"]).to_excel(
+                writer, sheet_name="clusters", index=False)
+
+        if data.get("clusters_by_group"):
+            g = data["clusters_by_group"]
+            rows = [{"cluster": r["label"], "group": grp or "(no group)",
+                     "pct_units_coded": r["pct"][grp],
+                     "deviation_from_mean": r["deviation"][grp],
+                     "cross_group_mean": r["mean"]}
+                    for r in g["rows"] for grp in g["groups"]]
+            pd.DataFrame(rows).to_excel(writer, sheet_name="clusters_by_group", index=False)
+
+        cc = data.get("cluster_cooccurrence")
+        if cc and cc["labels"]:
+            pd.DataFrame(cc["matrix"], index=cc["labels"], columns=cc["labels"]) \
+                .to_excel(writer, sheet_name="cluster_cooccurrence")
 
         d = data["documents"]
         if d["rows"]:
@@ -157,7 +178,8 @@ def export_analysis_bytes(data: dict) -> bytes:
                 writer, sheet_name=f"lemmas_{lang}", index=False)
 
         for lang, cells in sorted(data.get("lemmas_by_code", {}).items()):
-            rows = [{"code": c["code"], "lemma": x["lemma"], "freq": x["freq"],
+            rows = [{"code": c["code"], "cluster": c.get("cluster", ""),
+                     "lemma": x["lemma"], "freq": x["freq"],
                      "norm": x["norm"], "total_lemmas": c["total"],
                      "low_volume": c["flagged"]}
                     for c in cells for x in c.get("all", c["top"])]
@@ -165,7 +187,8 @@ def export_analysis_bytes(data: dict) -> bytes:
                 pd.DataFrame(rows).to_excel(writer, sheet_name=f"lemmas_by_code_{lang}",
                                             index=False)
         for lang, cells in sorted(data.get("lemmas_by_code_group", {}).items()):
-            rows = [{"code": c["code"], "group": c["group"] or "(no group)",
+            rows = [{"code": c["code"], "cluster": c.get("cluster", ""),
+                     "group": c["group"] or "(no group)",
                      "lemma": x["lemma"], "freq": x["freq"], "norm": x["norm"],
                      "total_lemmas": c["total"], "low_volume": c["flagged"]}
                     for c in cells for x in c.get("all", c["top"])]

@@ -34,7 +34,13 @@ MIN_LEMMA_MASS = 50  # cells below this total are flagged as low-volume, not hid
 # Bumped whenever the analysis dict shape changes, so a cached analysis_json from an
 # older deploy is recomputed instead of crashing the readers (charts/exports/template).
 # 2: expressions split per language + per-(code, group) drill-down; top_extracts_by_group.
-ANALYSIS_SCHEMA = 2
+# 3: code clusters — cluster on the code rows, plus the clusters/clusters_by_group/
+#    cluster_cooccurrence blocks (None when no code in the workspace has one).
+ANALYSIS_SCHEMA = 3
+
+# Codes with no cluster are shown under this label rather than dropped: a family
+# breakdown that silently loses codes is worse than one that admits the gap.
+NO_CLUSTER = "(no cluster)"
 
 
 def _stoplists(ws: Workspace) -> dict:
@@ -53,8 +59,10 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
                .order_by(Coding.document_id, Coding.start_offset).all())
     segments = (db.query(RunSegment).filter(RunSegment.run_id == run.id)
                 .order_by(RunSegment.document_id, RunSegment.position).all())
-    code_labels = {c.id: c.label for c in
-                   db.query(Code).filter(Code.workspace_id == ws.id).all()}
+    ws_codes = db.query(Code).filter(Code.workspace_id == ws.id).all()
+    code_labels = {c.id: c.label for c in ws_codes}
+    code_cluster = {c.id: (c.cluster or "").strip() or NO_CLUSTER for c in ws_codes}
+    has_clusters = any((c.cluster or "").strip() for c in ws_codes)
 
     n_segments = len(segments)
     n_excluded = sum(1 for s in segments if s.status == "excluded")
@@ -80,6 +88,7 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
     codes_block = sorted(({
         "code_id": cid,
         "label": code_labels.get(cid, f"code {cid}"),
+        "cluster": code_cluster.get(cid, NO_CLUSTER) if has_clusters else "",
         "codings": per_code_codings[cid],
         "units": per_code_units[cid],
         "pct_units": round(100 * per_code_units[cid] / n_codable, 1) if n_codable else 0,
@@ -112,6 +121,7 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
             mean = round(sum(pcts.values()) / len(group_names), 1)
             rows.append({
                 "label": code_labels.get(cid, f"code {cid}"),
+                "cluster": code_cluster.get(cid, NO_CLUSTER) if has_clusters else "",
                 "pct": pcts,
                 "mean": mean,
                 "deviation": {g: round(pcts[g] - mean, 1) for g in group_names},
@@ -129,6 +139,66 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
     labels = [code_labels.get(cid, f"code {cid}") for cid in code_order]
     matrix = [[co.get((min(a, b), max(a, b)), 0) for b in code_order] for a in code_order]
     cooccurrence_block = {"labels": labels, "matrix": matrix}
+
+    # ── clusters (families of codes) ──────────────────────────────────────────
+    # Always counted on distinct units, never by summing the per-code rows: a
+    # unit carrying two codes of the same family would be counted twice, and the
+    # inflation differs per family — which would corrupt exactly the between-
+    # family comparison this block exists to make.
+    clusters_block = None
+    clusters_by_group_block = None
+    cluster_cooccurrence_block = None
+    if has_clusters:
+        unit_clusters = {k: {code_cluster.get(cid, NO_CLUSTER) for cid in code_set}
+                         for k, code_set in units.items()}
+        per_cluster_codings = Counter(code_cluster.get(c.code_id, NO_CLUSTER)
+                                      for c in codings)
+        per_cluster_units = Counter()
+        for cl_set in unit_clusters.values():
+            for cl in cl_set:
+                per_cluster_units[cl] += 1
+        # busiest first, uncategorised always last
+        cluster_order = sorted(per_cluster_units,
+                               key=lambda cl: (cl == NO_CLUSTER,
+                                               -per_cluster_units[cl], cl.lower()))
+        clusters_block = [{
+            "cluster": cl,
+            "codes": sum(1 for cid in per_code_units
+                         if code_cluster.get(cid, NO_CLUSTER) == cl),
+            "codings": per_cluster_codings[cl],
+            "units": per_cluster_units[cl],
+            "pct_units": round(100 * per_cluster_units[cl] / n_codable, 1) if n_codable else 0,
+        } for cl in cluster_order]
+
+        if groups_block:
+            per_cluster_group_units: dict = {}
+            for key, cl_set in unit_clusters.items():
+                g = doc_group.get(key[0], "")
+                for cl in cl_set:
+                    per_cluster_group_units.setdefault(cl, Counter())[g] += 1
+            rows = []
+            for cl in cluster_order:
+                pcts = {}
+                for g in group_names:
+                    n = per_cluster_group_units.get(cl, Counter()).get(g, 0)
+                    pcts[g] = round(100 * n / segs_per_group[g], 1) if segs_per_group[g] else 0
+                mean = round(sum(pcts.values()) / len(group_names), 1)
+                rows.append({"label": cl, "pct": pcts, "mean": mean,
+                             "deviation": {g: round(pcts[g] - mean, 1) for g in group_names}})
+            clusters_by_group_block = {"groups": group_names,
+                                       "units_per_group": dict(segs_per_group),
+                                       "rows": rows}
+
+        cco = Counter()
+        for cl_set in unit_clusters.values():
+            ordered = sorted(cl_set)
+            for i in range(len(ordered)):
+                for j in range(i, len(ordered)):
+                    cco[(ordered[i], ordered[j])] += 1
+        cluster_cooccurrence_block = {
+            "labels": cluster_order,
+            "matrix": [[cco.get((min(a, b), max(a, b)), 0) for b in cluster_order]
+                       for a in cluster_order]}
 
     # ── documents ─────────────────────────────────────────────────────────────
     segs_per_doc = Counter(s.document_id for s in codable)
@@ -200,14 +270,18 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
             "all": all_lemmas,
         }
 
+    cluster_by_label = {code_labels[cid]: (code_cluster[cid] if has_clusters else "")
+                        for cid in code_labels}
     lemmas_block = {lang: _cell(c) for lang, c in sorted(overall.items())}
     lemmas_by_code_block = {}
     for (lang, label), c in sorted(by_code.items()):
-        lemmas_by_code_block.setdefault(lang, []).append({"code": label, **_cell(c)})
+        lemmas_by_code_block.setdefault(lang, []).append(
+            {"code": label, "cluster": cluster_by_label.get(label, ""), **_cell(c)})
     lemmas_by_code_group_block = {}
     for (lang, label, group), c in sorted(by_code_group.items()):
         lemmas_by_code_group_block.setdefault(lang, []).append(
-            {"code": label, "group": group, **_cell(c)})
+            {"code": label, "cluster": cluster_by_label.get(label, ""),
+             "group": group, **_cell(c)})
 
     # ── dictionary-only blocks ────────────────────────────────────────────────
     # expressions: firings split per language, with a per-(code, group) breakdown
@@ -274,6 +348,9 @@ def compute_analysis(run: Run, ws: Workspace, db, progress: dict | None = None) 
         "codes": codes_block,
         "groups": groups_block,
         "cooccurrence": cooccurrence_block,
+        "clusters": clusters_block,
+        "clusters_by_group": clusters_by_group_block,
+        "cluster_cooccurrence": cluster_cooccurrence_block,
         "documents": documents_block,
         "lemmas": lemmas_block,
         "lemmas_by_code": lemmas_by_code_block,

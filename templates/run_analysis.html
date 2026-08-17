@@ -61,15 +61,16 @@
   {% endif %}
   <img id="img-{{ name }}" class="an-chart" src="/api/runs/{{ run.id }}/analysis/chart/{{ name }}?fmt=png&theme=dark" alt="{{ name }}">
 
-  {% if name == 'groups' and data.groups %}
+  {% if name in ('groups', 'clusters_by_group') and data[name] %}
+  {% set blk = data[name] %}
   <table class="table" style="margin-top:12px">
-    <thead><tr><th>{{ T.cb_label }}</th>
-      {% for g in data.groups.groups %}<th>{{ g or '(no group)' }} %</th><th>Δ</th>{% endfor %}
+    <thead><tr><th>{{ T.cb_label if name == 'groups' else T.cb_cluster }}</th>
+      {% for g in blk.groups %}<th>{{ g or '(no group)' }} %</th><th>Δ</th>{% endfor %}
       <th>mean</th></tr></thead>
     <tbody>
-      {% for r in data.groups.rows %}
+      {% for r in blk.rows %}
       <tr><td>{{ r.label }}</td>
-        {% for g in data.groups.groups %}
+        {% for g in blk.groups %}
         <td>{{ r.pct[g] }}</td>
         <td class="muted">{{ '%+.1f'|format(r.deviation[g]) }}</td>
         {% endfor %}
@@ -77,6 +78,21 @@
       {% endfor %}
     </tbody>
   </table>
+  {% endif %}
+
+  {% if name == 'clusters' and data.clusters %}
+  <table class="table" style="margin-top:12px">
+    <thead><tr><th>{{ T.cb_cluster }}</th><th>{{ T.an_cl_codes }}</th>
+      <th>{{ T.an_cl_codings }}</th><th>{{ T.an_cl_units }}</th><th>%</th></tr></thead>
+    <tbody>
+      {% for r in data.clusters %}
+      <tr><td>{{ r.cluster }}</td><td class="muted">{{ r.codes }}</td>
+        <td class="muted">{{ r.codings }}</td><td>{{ r.units }}</td>
+        <td>{{ r.pct_units }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">{{ T.an_cl_hint }}</p>
   {% endif %}
 </div>
 {% endfor %}

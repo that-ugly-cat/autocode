@@ -446,6 +446,11 @@ if docx_path.exists():
     r = client.get(f"/api/runs/{run_id}/export/xlsx")
     check("export xlsx", r.status_code == 200 and r.content[:2] == b"PK")
     import pandas as _pd_xl
+    cdf = _pd_xl.read_excel(_io.BytesIO(r.content), sheet_name=f"run_{run_id}_codings")
+    check("codings sheet carries the cluster next to the code",
+          "code_cluster" in cdf.columns
+          and list(cdf.columns).index("code_cluster") == list(cdf.columns).index("code") + 1,
+          str(list(cdf.columns)))
     sdf = _pd_xl.read_excel(_io.BytesIO(r.content), sheet_name="segments")
     check("xlsx segments sheet has uncoded rows",
           "status" in sdf.columns and (sdf["status"] == "no_code").any(), str(sdf.columns))
@@ -1006,6 +1011,84 @@ check("lemma drill-down sheets (per code, per code+group)",
       and "low_volume" in an_sheets["lemmas_by_code_en"].columns
       and an_sheets["lemmas_by_code_en"]["low_volume"].all(),  # tiny test corpus: all flagged
       str(list(an_sheets)))
+check("no cluster blocks when the codebook has no clusters",
+      not {"clusters", "clusters_by_group", "cluster_cooccurrence"} & set(an_sheets),
+      str(list(an_sheets)))
+
+print("== analysis: code clusters ==")
+# a grouped corpus with two codes in the same family, so the cluster figures can
+# be checked against the code figures they must NOT be the sum of
+cl_ws = dictuser.post("/api/workspaces",
+                      json={"name": "Cluster WS", "input_type": "excel",
+                            "segmentation_mode": "cell",
+                            "study_context": "cluster block test"}).json()["id"]
+cl_path = Path("data/test_clusters.xlsx")
+# word forms are verbatim on purpose: the fake spaCy lemmatizer above just
+# lowercases, so 'glitched' would not match the expression 'glitch'
+_pd.DataFrame({
+    "arm": ["A", "A", "B", "B"],
+    "answer": [
+        "the microphone glitch made the transcript wrong",  # 2 codes, same family
+        "I would rather type my answer",                    # other family
+        "another microphone glitch today",                  # 1 code, same family
+        "I would rather type here as well",                 # other family
+    ],
+}).to_excel(cl_path, index=False)
+with cl_path.open("rb") as f:
+    cins = dictuser.post(f"/api/workspaces/{cl_ws}/excel/inspect",
+                         files={"file": ("clusters.xlsx", f, "application/vnd.ms-excel")}).json()
+dictuser.post(f"/api/workspaces/{cl_ws}/excel/confirm",
+              json={"token": cins["token"], "filename": "clusters.xlsx",
+                    "sheet": list(cins["sheets"])[0], "columns": ["answer"],
+                    "group_column": "arm"})
+for label, cluster, exprs in (
+        ("mic_failure", "Technical", ["microphone glitch"]),
+        ("bad_transcript", "Technical", ["transcript wrong"]),
+        ("prefers_typing", "Preference", ["rather type"])):
+    dictuser.post(f"/api/workspaces/{cl_ws}/codes",
+                  json={"label": label, "cluster": cluster, "expressions": {"en": exprs}})
+db = SessionLocal()
+cl_docs = [d.id for d in db.query(_Doc2).filter(_Doc2.workspace_id == cl_ws).all()]
+db.close()
+r = dictuser.post(f"/api/workspaces/{cl_ws}/runs",
+                  json={"document_ids": cl_docs, "engine": "dictionary"})
+cl_run = r.json()["id"]
+for _ in range(200):
+    if dictuser.get(f"/api/runs/{cl_run}").json()["status"] in ("completed", "failed"):
+        break
+    _time.sleep(0.1)
+check("cluster run completed",
+      dictuser.get(f"/api/runs/{cl_run}").json()["status"] == "completed")
+check("cluster analysis computed", ensure_analysis(dictuser, cl_run) == "done")
+r = dictuser.get(f"/api/runs/{cl_run}/analysis/export")
+cl_sheets = _pd.read_excel(_io.BytesIO(r.content), sheet_name=None)
+check("cluster sheets present",
+      {"clusters", "clusters_by_group", "cluster_cooccurrence"} <= set(cl_sheets),
+      str(list(cl_sheets)))
+cls = cl_sheets["clusters"].set_index("cluster")
+tech_codings = cls.loc["Technical", "codings"]
+tech_units = cls.loc["Technical", "units"]
+check("cluster units count each unit once, not once per code",
+      tech_codings == 3 and tech_units == 2, f"codings={tech_codings} units={tech_units}")
+check("cluster row counts its codes", cls.loc["Technical", "codes"] == 2,
+      str(cls.loc["Technical"].to_dict()))
+cbg = cl_sheets["clusters_by_group"]
+check("clusters_by_group carries both arms",
+      set(cbg["group"]) == {"A", "B"} and {"pct_units_coded", "deviation_from_mean"}
+      <= set(cbg.columns), str(list(cbg.columns)))
+check("cluster column added to the code-level sheets",
+      "cluster" in cl_sheets["codes"].columns and "cluster" in cl_sheets["groups"].columns
+      and (cl_sheets["codes"]["cluster"] == "Technical").any(),
+      str(list(cl_sheets["codes"].columns)))
+for chart in ("clusters", "clusters_by_group", "cluster_cooccurrence"):
+    r = dictuser.get(f"/api/runs/{cl_run}/analysis/chart/{chart}?fmt=png&theme=dark")
+    check(f"{chart} chart renders", r.status_code == 200 and r.content[:4] == b"\x89PNG")
+r = dictuser.get(f"/workspace/{cl_ws}/runs/{cl_run}/analysis")
+check("analysis page shows the cluster cards", r.status_code == 200
+      and "/analysis/chart/clusters" in r.text
+      and "/analysis/chart/cluster_cooccurrence" in r.text, r.text[:200])
+dictuser.delete(f"/api/workspaces/{cl_ws}")
+cl_path.unlink(missing_ok=True)
 r = dictuser.get(f"/api/runs/{drun}/analysis/chart/lemmas_en?code=financial_burden")
 check("lemma chart per code", r.status_code == 200 and r.content[:4] == b"\x89PNG")
 r = dictuser.get(f"/api/runs/{drun}/analysis/chart/lemmas_en"

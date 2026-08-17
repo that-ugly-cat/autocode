@@ -99,6 +99,29 @@ def _matrix(labels: list[str], matrix: list[list], title: str,
     return _to_bytes(fig, fmt)
 
 
+def _by_group_barh(block: dict, title: str, theme: str, fmt: str) -> bytes:
+    """Grouped horizontal bars for a {groups, rows:[{label, pct}]} block —
+    shared by the per-code and the per-cluster views so they read identically."""
+    groups, rows = block["groups"], block["rows"]
+    fig, t = _fig(theme, 0.5 * len(rows) + 1.6)
+    ax = fig.add_subplot(111)
+    bar_h = 0.8 / max(1, len(groups))
+    for k, grp in enumerate(groups):
+        ys = [i + k * bar_h for i in range(len(rows))]
+        ax.barh(ys, [r["pct"][grp] for r in rows], height=bar_h * 0.92,
+                color=GROUP_COLORS[k % len(GROUP_COLORS)], label=grp or "(no group)")
+    ax.set_yticks([i + 0.4 for i in range(len(rows))])
+    ax.set_yticklabels([r["label"] for r in rows])
+    ax.invert_yaxis()
+    ax.set_xlabel("% of group's units coded")
+    ax.set_title(title, loc="left", fontsize=11, color=t["text"])
+    ax.legend(fontsize=8, facecolor=t["panel"], edgecolor=t["grid"], labelcolor=t["text"])
+    ax.grid(axis="x", color=t["grid"], linewidth=0.5, alpha=0.6)
+    ax.set_axisbelow(True)
+    _style_axes(ax, t)
+    return _to_bytes(fig, fmt)
+
+
 def render_chart(name: str, data: dict, theme: str = "dark", fmt: str = "png",
                  code: str | None = None, group: str | None = None) -> bytes | None:
     """Render one analysis chart. Returns None when the block has no data.
@@ -107,36 +130,28 @@ def render_chart(name: str, data: dict, theme: str = "dark", fmt: str = "png",
         items = [(b["label"], b["codings"]) for b in data["codes"]]
         return _barh(items, "Codings per code", "codings", theme, fmt) if items else None
 
-    if name == "groups":
-        g = data.get("groups")
+    if name in ("groups", "clusters_by_group"):
+        g = data.get(name)
         if not g:
             return None
-        groups = g["groups"]
-        rows = g["rows"]
-        fig, t = _fig(theme, 0.5 * len(rows) + 1.6)
-        ax = fig.add_subplot(111)
-        bar_h = 0.8 / max(1, len(groups))
-        for k, grp in enumerate(groups):
-            ys = [i + k * bar_h for i in range(len(rows))]
-            ax.barh(ys, [r["pct"][grp] for r in rows], height=bar_h * 0.92,
-                    color=GROUP_COLORS[k % len(GROUP_COLORS)], label=grp or "(no group)")
-        ax.set_yticks([i + 0.4 for i in range(len(rows))])
-        ax.set_yticklabels([r["label"] for r in rows])
-        ax.invert_yaxis()
-        ax.set_xlabel("% of group's units coded")
-        ax.set_title("Codes by group (normalized)", loc="left", fontsize=11, color=t["text"])
-        leg = ax.legend(fontsize=8, facecolor=t["panel"], edgecolor=t["grid"],
-                        labelcolor=t["text"])
-        ax.grid(axis="x", color=t["grid"], linewidth=0.5, alpha=0.6)
-        ax.set_axisbelow(True)
-        _style_axes(ax, t)
-        return _to_bytes(fig, fmt)
+        title = ("Codes by group (normalized)" if name == "groups"
+                 else "Clusters by group (normalized)")
+        return _by_group_barh(g, title, theme, fmt)
 
-    if name == "cooccurrence":
-        c = data["cooccurrence"]
-        if not c["labels"]:
+    if name == "clusters":
+        blocks = data.get("clusters")
+        if not blocks:
             return None
-        return _matrix(c["labels"], c["matrix"], "Code co-occurrence (units)", theme, fmt)
+        items = [(b["cluster"], b["units"]) for b in blocks]
+        return _barh(items, "Units per cluster", "units", theme, fmt)
+
+    if name in ("cooccurrence", "cluster_cooccurrence"):
+        c = data.get(name)
+        if not c or not c["labels"]:
+            return None
+        title = ("Code co-occurrence (units)" if name == "cooccurrence"
+                 else "Cluster co-occurrence (units)")
+        return _matrix(c["labels"], c["matrix"], title, theme, fmt)
 
     if name == "documents":
         d = data["documents"]
@@ -218,6 +233,12 @@ def available_charts(data: dict) -> list[str]:
         names.append("groups")
     if data["cooccurrence"]["labels"]:
         names += ["cooccurrence", "documents"]
+    if data.get("clusters"):
+        names.append("clusters")
+    if data.get("clusters_by_group"):
+        names.append("clusters_by_group")
+    if (data.get("cluster_cooccurrence") or {}).get("labels"):
+        names.append("cluster_cooccurrence")
     names += [f"lemmas_{lang}" for lang in sorted(data.get("lemmas", {}))]
     exprs = data.get("expressions")
     if isinstance(exprs, dict):  # new schema: {lang: [...]}; old caches were a flat list
