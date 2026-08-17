@@ -183,6 +183,30 @@ r = member.post(f"/api/workspaces/{ws_id}/codes", json={"label": "Autonomy"})
 check("duplicate label (case-insensitive) rejected", r.status_code == 400)
 r = member.put(f"/api/codes/{code_id}", json={"label": "autonomy", "description": "Updated by member"})
 check("member can edit code", r.status_code == 200, r.text)
+
+# ── clusters: free-text family, picked from existing or typed fresh
+r = client.post(f"/api/workspaces/{ws_id}/codes",
+                json={"label": "beneficence", "cluster": "Principles",
+                      "description": "Doing good"})
+check("add code with cluster", r.status_code == 200, r.text)
+clustered_id = r.json()["id"]
+r = client.post(f"/api/workspaces/{ws_id}/codes",
+                json={"label": "  ", "cluster": "Principles"})
+check("blank label still rejected with cluster", r.status_code == 400)
+r = client.get(f"/workspace/{ws_id}/codebook")
+check("cluster group header rendered", r.status_code == 200 and "Principles" in r.text, r.text[:200])
+check("cluster offered in datalist",
+      '<datalist id="cluster-options">' in r.text and '<option value="Principles">' in r.text)
+check("uncategorised codes still listed", "autonomy" in r.text)
+# whitespace-only cluster normalises to null, not to an empty group
+r = client.put(f"/api/codes/{clustered_id}",
+               json={"label": "beneficence", "cluster": "   ", "description": "Doing good"})
+check("blank cluster clears to null", r.status_code == 200, r.text)
+r = client.get(f"/workspace/{ws_id}/codebook")
+check("cleared cluster drops out of datalist", '<option value="Principles">' not in r.text)
+r = client.put(f"/api/codes/{clustered_id}",
+               json={"label": "beneficence", "cluster": "Principles", "description": "Doing good"})
+check("cluster restored", r.status_code == 200, r.text)
 cb_path = Path("../test_transcripts/codebook.xlsx")
 if cb_path.exists():
     with cb_path.open("rb") as f:
@@ -428,12 +452,62 @@ if docx_path.exists():
     r = client.get(f"/api/runs/{run_id}/export/qdc")
     check("export qdc", r.status_code == 200 and b"autonomy" in r.content
           and b"CodeBook" in r.content)
+
+    # ── clusters become a code hierarchy in REFI-QDA
+    import xml.etree.ElementTree as _ET
+
+    def _strip_ns(elem):
+        for e in elem.iter():
+            if isinstance(e.tag, str) and "}" in e.tag:
+                e.tag = e.tag.split("}", 1)[1]
+        return elem
+
+    client.put(f"/api/codes/{autonomy_id}",
+               json={"label": "autonomy", "cluster": "Principles",
+                     "description": "Patient autonomy themes"})
+    loose_id = client.post(f"/api/workspaces/{run_ws}/codes",
+                           json={"label": "zz_unclustered"}).json()["id"]
+    r = client.get(f"/api/runs/{run_id}/export/qdc")
+    qdc_root = _strip_ns(_ET.fromstring(r.content))
+    qdc_codes = qdc_root.find("Codes")
+    qdc_parent = next((c for c in qdc_codes.findall("Code")
+                       if c.get("name") == "Principles"), None)
+    check("qdc nests clustered codes under the cluster",
+          qdc_parent is not None
+          and qdc_parent.get("isCodable") == "false"
+          and any(ch.get("name") == "autonomy" and ch.get("isCodable") == "true"
+                  for ch in qdc_parent.findall("Code")),
+          r.content[:400].decode("utf-8", "replace"))
+    check("qdc keeps uncategorised codes at the root",
+          any(c.get("name") == "zz_unclustered" and c.get("isCodable") == "true"
+              for c in qdc_codes.findall("Code")))
+
     r = client.get(f"/api/runs/{run_id}/export/qdpx")
     qdpx_ok = r.status_code == 200
     if qdpx_ok:
-        names = _zip.ZipFile(_io.BytesIO(r.content)).namelist()
+        zf = _zip.ZipFile(_io.BytesIO(r.content))
+        names = zf.namelist()
         qdpx_ok = "project.qde" in names and any(n.startswith("sources/") for n in names)
+        qde = _strip_ns(_ET.fromstring(zf.read("project.qde")))
+        qde_codes = qde.find("CodeBook").find("Codes")
+        parent = next((c for c in qde_codes.findall("Code")
+                       if c.get("name") == "Principles"), None)
+        child = (next((ch for ch in parent.findall("Code")
+                       if ch.get("name") == "autonomy"), None)
+                 if parent is not None else None)
+        check("qdpx nests clustered codes under the cluster",
+              parent is not None and parent.get("isCodable") == "false"
+              and child is not None)
+        # the parent is a container: codings must still target the child's guid
+        targets = {sel.get("targetGUID") for sel in qde.iter("CodeRef")}
+        check("qdpx codings target the child code, not the cluster",
+              child is not None and child.get("guid") in targets
+              and parent.get("guid") not in targets,
+              f"parent={parent.get('guid') if parent is not None else None} targets={targets}")
     check("export qdpx (zip with project.qde + sources/)", qdpx_ok)
+    client.delete(f"/api/codes/{loose_id}")
+    client.put(f"/api/codes/{autonomy_id}",
+               json={"label": "autonomy", "description": "Patient autonomy themes"})
     r = client.get(f"/workspace/{run_ws}/codebook")
     check("codebook shows extract counts", r.status_code == 200 and f"/codes/{autonomy_id}" in r.text)
     r = client.get(f"/workspace/{run_ws}/codes/{autonomy_id}")
@@ -606,6 +680,40 @@ check("group split filters rows per group (A=3, B=1)",
 r = client.get(f"/workspace/{grp_ws}/corpus")
 check("corpus shows the group in the document name",
       "feedback] (A)" in r.text and "feedback] (B)" in r.text)
+
+# respondent answers spelled like a missing-value token survive ingestion:
+# pandas' default NA table would eat 'N/A', 'NA', 'null' and 'None' silently
+na_ws = client.post("/api/workspaces", json={"name": "NA WS", "input_type": "excel",
+                                             "segmentation_mode": "cell",
+                                             "study_context": "na tokens"}).json()["id"]
+na_path = Path("data/test_survey_na.xlsx")
+_pd.DataFrame({
+    "arm": ["A", "N/A", "A", "A", "A", "A"],
+    "feedback": ["N/A", "grouped under a literal N/A arm", "NA", "null", "None", ""],
+}).to_excel(na_path, index=False)
+with na_path.open("rb") as f:
+    nxls = client.post(f"/api/workspaces/{na_ws}/excel/inspect",
+                       files={"file": ("survey_na.xlsx", f, "application/vnd.ms-excel")}).json()
+nsheet = list(nxls["sheets"].keys())[0]
+ncol = next(c for c in nxls["sheets"][nsheet] if c["name"] == "feedback")
+check("inspect counts NA-like answers as values", ncol["n_values"] == 5, str(ncol))
+r = client.post(f"/api/workspaces/{na_ws}/excel/confirm",
+                json={"token": nxls["token"], "filename": "survey_na.xlsx",
+                      "sheet": nsheet, "columns": ["feedback"], "group_column": "arm"})
+check("group split keeps a literal 'N/A' as its own group",
+      r.status_code == 200 and set(r.json()["created"]) == {"feedback (A)", "feedback (N/A)"},
+      r.text)
+db = SessionLocal()
+nadocs = {d.group_label: d.id for d in db.query(_Doc2).filter(_Doc2.workspace_id == na_ws).all()}
+db.close()
+naprev = client.get(f"/api/documents/{nadocs['A']}/preview-segments").json()
+check("NA-like answers become segments, blank cells do not",
+      naprev["total"] == 4, str(naprev.get("total")))
+check("the literal text is preserved, not coerced",
+      {s["text"] for s in naprev["segments"]} == {"N/A", "NA", "null", "None"},
+      str([s["text"] for s in naprev["segments"]]))
+client.delete(f"/api/workspaces/{na_ws}")
+na_path.unlink(missing_ok=True)
 
 # corpus bundle: export grp_ws, import into a fresh workspace, round-trip metadata
 r = client.get(f"/api/workspaces/{grp_ws}/corpus/export")
@@ -933,6 +1041,7 @@ check("top extracts ranked by score",
       or len(an_sheets["top_extracts"]) > 0)
 
 # codebook export: import-compatible round trip
+dictuser.put(f"/api/codes/{fin_id}", json={"label": "financial_burden", "cluster": "Economic"})
 r = dictuser.get(f"/api/workspaces/{dws}/codebook/export")
 cbx = _pd.read_excel(_io.BytesIO(r.content))
 check("codebook export with expression columns",
@@ -947,11 +1056,21 @@ rt_path.write_bytes(r.content)
 with rt_path.open("rb") as f:
     r = dictuser.post(f"/api/workspaces/{rt_ws}/codebook/preview-import",
                       files={"file": ("cb.xlsx", f, "application/vnd.ms-excel")})
-rt_rows = [{"label": x["label"], "description": x["description"], "example": x["example"],
+check("codebook export carries cluster column",
+      "Code cluster" in cbx.columns
+      and (cbx["Code cluster"].astype(str) == "Economic").any(), str(list(cbx.columns)))
+rt_rows = [{"label": x["label"], "cluster": x.get("cluster"),
+            "description": x["description"], "example": x["example"],
             "expressions": x.get("expressions")} for x in r.json()["rows"] if not x["duplicate"]]
 r = dictuser.post(f"/api/workspaces/{rt_ws}/codebook/import", json={"rows": rt_rows})
 check("codebook export → import round trip", r.status_code == 200
       and r.json()["created"] == len(cbx), r.text)
+r = dictuser.get(f"/api/workspaces/{rt_ws}/codebook/export")
+cbx2 = _pd.read_excel(_io.BytesIO(r.content))
+check("cluster survives the round trip",
+      sorted(cbx["Code cluster"].fillna("").astype(str))
+      == sorted(cbx2["Code cluster"].fillna("").astype(str)),
+      str(sorted(cbx2["Code cluster"].fillna("").astype(str))))
 dictuser.delete(f"/api/workspaces/{rt_ws}")
 rt_path.unlink(missing_ok=True)
 

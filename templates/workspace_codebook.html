@@ -15,9 +15,15 @@
   </div>
 </div>
 
+<datalist id="cluster-options">
+  {% for c in clusters %}<option value="{{ c }}"></option>{% endfor %}
+</datalist>
+
 <div id="add-code" class="card" style="display:none">
   <form onsubmit="return addCode(event)">
     <label>{{ T.cb_label }}<input type="text" id="new-label" required></label>
+    <label>{{ T.cb_cluster }}<input type="text" id="new-cluster" list="cluster-options" autocomplete="off"></label>
+    <p class="muted small">{{ T.cb_cluster_hint }}</p>
     <label>{{ T.cb_description }}<textarea id="new-desc" rows="2"></textarea></label>
     <label>{{ T.cb_example }}<textarea id="new-example" rows="2"></textarea></label>
     <div class="cards-label">{{ T.cb_expr_title }}</div>
@@ -102,8 +108,12 @@
 {% else %}
 <div class="cb-list" id="codes-table">
   {% for code in codes %}
+  {% if loop.changed(code.cluster or '') %}
+  <div class="cards-label">{{ code.cluster or T.cb_cluster_none }}</div>
+  {% endif %}
   <div class="cb-card" id="code-row-{{ code.id }}"
-       data-label="{{ code.label }}" data-desc="{{ code.description or '' }}" data-example="{{ code.example or '' }}">
+       data-label="{{ code.label }}" data-cluster="{{ code.cluster or '' }}"
+       data-desc="{{ code.description or '' }}" data-example="{{ code.example or '' }}">
     <div class="cb-card-head">
       <div class="cb-card-title">
         <strong>{{ code.label }}</strong>
@@ -151,6 +161,7 @@ async function addCode(e) {
   try {
     await api('POST', '/api/workspaces/{{ ws.id }}/codes', {
       label: document.getElementById('new-label').value,
+      cluster: document.getElementById('new-cluster').value,
       description: document.getElementById('new-desc').value,
       example: document.getElementById('new-example').value,
       expressions: expressions,
@@ -162,8 +173,10 @@ async function addCode(e) {
 function editCode(id) {
   const row = document.getElementById('code-row-' + id);
   const label = row.dataset.label, desc = row.dataset.desc, example = row.dataset.example;
+  const cluster = row.dataset.cluster || '';
   row.innerHTML =
     '<label>{{ T.cb_label }}<input type="text" id="edit-label-' + id + '" value="' + esc(label) + '"></label>' +
+    '<label>{{ T.cb_cluster }}<input type="text" id="edit-cluster-' + id + '" list="cluster-options" autocomplete="off" value="' + esc(cluster) + '"></label>' +
     '<label>{{ T.cb_description }}<textarea id="edit-desc-' + id + '" rows="3">' + esc(desc) + '</textarea></label>' +
     '<label>{{ T.cb_example }}<textarea id="edit-example-' + id + '" rows="2">' + esc(example) + '</textarea></label>' +
     '<div class="inline-form">' +
@@ -174,6 +187,7 @@ async function saveCode(id) {
   try {
     await api('PUT', '/api/codes/' + id, {
       label: document.getElementById('edit-label-' + id).value,
+      cluster: document.getElementById('edit-cluster-' + id).value,
       description: document.getElementById('edit-desc-' + id).value,
       example: document.getElementById('edit-example-' + id).value,
     });
@@ -193,9 +207,10 @@ async function previewImport() {
   try {
     const res = await api('POST', '/api/workspaces/{{ ws.id }}/codebook/preview-import', form, true);
     importRows = res.rows.filter(r => !r.duplicate);
-    let html = '<table class="table"><thead><tr><th>{{ T.cb_label }}</th><th>{{ T.cb_description }}</th><th></th></tr></thead><tbody>';
+    let html = '<table class="table"><thead><tr><th>{{ T.cb_label }}</th><th>{{ T.cb_cluster }}</th><th>{{ T.cb_description }}</th><th></th></tr></thead><tbody>';
     for (const r of res.rows) {
       html += '<tr class="' + (r.duplicate ? 'row-muted' : '') + '"><td>' + esc(r.label) + '</td><td>' +
+        esc(r.cluster || '') + '</td><td>' +
         esc(r.description || '') + '</td><td>' + (r.duplicate ? '<span class="badge badge-muted">{{ T.cb_import_skipped }}</span>' : '') + '</td></tr>';
     }
     html += '</tbody></table>';

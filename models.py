@@ -132,6 +132,7 @@ class Code(Base):
     id                = Column(Integer, primary_key=True)
     workspace_id      = Column(Integer, ForeignKey("workspaces.id"), nullable=False)
     label             = Column(String, nullable=False)
+    cluster           = Column(String, nullable=True)   # free-text family, for grouping codes
     description       = Column(Text, nullable=True)
     example           = Column(Text, nullable=True)
     is_model_proposed = Column(Boolean, default=False)
@@ -315,6 +316,7 @@ def init_db():
             "ALTER TABLE users ADD COLUMN totp_secret_encrypted VARCHAR",
             "ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN backup_codes_json TEXT",
+            "ALTER TABLE codes ADD COLUMN cluster VARCHAR",
         ]:
             try:
                 conn.execute(text(stmt))

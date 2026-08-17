@@ -50,7 +50,8 @@ For the LLM engine, fill in the **study context** in Settings: a short descripti
 
 A code has a **label**, a **description** (what the model reads — make it count), an optional **example**, and optional **dictionary expressions** per language.
 
-- **Import from Excel**: columns `Code`, `Description`, `Example` (optional) and `Expressions_en` / `Expressions_de` / `Expressions_fr` / `Expressions_it` (optional, `;`-separated; quoted expressions like `"on my own"` work inside the cell). Duplicates are detected on a normalized label and skipped, with a preview before anything is written. **Export to Excel** produces the same format — full round trip.
+- **Import from Excel**: columns `Code`, `Description`, `Example` (optional), `Code cluster` (optional) and `Expressions_en` / `Expressions_de` / `Expressions_fr` / `Expressions_it` (optional, `;`-separated; quoted expressions like `"on my own"` work inside the cell). Duplicates are detected on a normalized label and skipped, with a preview before anything is written. **Export to Excel** produces the same format — full round trip.
+- **Clusters**: an optional free-text family on each code (`Non-use`, `Privacy`, …), picked from the ones already in use or typed fresh. The codebook page groups codes by cluster, uncategorised last, and the cluster travels through import and export. It is an organisational label only: it is **not** sent to the model and does not influence coding.
 - **Model-proposed codes**: during an LLM run the model may propose new codes; they enter the codebook with a visible badge and are fully editable. Exact duplicates are merged automatically.
 - **Deletion is soft**: removed codes disappear from the active codebook but historical codings remain readable.
 - The **Extracts** count next to each code opens all its coded segments, with the rationale of every assignment, grouped by document and filterable by run.

@@ -11,6 +11,10 @@ MAXQDA conventions (reverse-engineered, see wiki autocode.md):
 - source files in 'sources/' (lowercase) named by guid
 - codings wrapped in <PlainTextSelection startPosition endPosition>
 - modifyingUser/modifiedDateTime on all elements, xsi:schemaLocation on <Project>
+
+Code clusters travel to QDA software as a hierarchy: each cluster becomes a
+non-codable parent <Code> wrapping its members, uncategorised codes stay at the
+root. Codings always target the child guid, never the parent.
 """
 import io
 import re
@@ -57,6 +61,7 @@ def export_xlsx_bytes(run: Run, db) -> bytes:
         expr_map.setdefault((e.code_id, e.language), []).append(e.expression)
     cb_rows = [{
         "Code": c.label,
+        "Code cluster": c.cluster or "",
         "Description": c.description or "",
         "Example": c.example or "",
         "Proposed by model": c.is_model_proposed,
@@ -104,6 +109,7 @@ def export_codebook_bytes(workspace_id: int, db) -> bytes:
         expr_map.setdefault((e.code_id, e.language), []).append(e.expression)
     rows = [{
         "Code": c.label,
+        "Code cluster": c.cluster or "",
         "Description": c.description or "",
         "Example": c.example or "",
         **{f"Expressions_{lang}": "; ".join(expr_map.get((c.id, lang), []))
@@ -202,17 +208,44 @@ def export_analysis_bytes(data: dict) -> bytes:
 
 # ── QDC (REFI-QDA codebook) ───────────────────────────────────────────────────
 
+def _grouped_codes(codes) -> list[tuple[str | None, list]]:
+    """
+    Codes arranged for the REFI-QDA tree: one group per cluster, sorted by name,
+    then the codes with no cluster as a final group under the root.
+    """
+    buckets: dict[str, list] = {}
+    loose: list = []
+    for code in codes:
+        cluster = (code.cluster or "").strip()
+        if cluster:
+            buckets.setdefault(cluster, []).append(code)
+        else:
+            loose.append(code)
+    by_label = lambda group: sorted(group, key=lambda c: c.label.lower())
+    out = [(name, by_label(buckets[name])) for name in sorted(buckets, key=str.lower)]
+    if loose:
+        out.append((None, by_label(loose)))
+    return out
+
+
 def export_qdc_bytes(codes: list[Code]) -> bytes:
     root = ET.Element("CodeBook", {"origin": "Autocode", "xmlns": "urn:QDA-XML:codebook:1:0"})
     codes_elem = ET.SubElement(root, "Codes")
-    for code in codes:
-        code_elem = ET.SubElement(codes_elem, "Code", {
+    for cluster, group in _grouped_codes(codes):
+        # a cluster becomes a non-codable parent code: grouping only, never assigned
+        parent = codes_elem if cluster is None else ET.SubElement(codes_elem, "Code", {
             "guid": str(uuid.uuid4()),
-            "name": code.label,
-            "isCodable": "true",
+            "name": cluster,
+            "isCodable": "false",
         })
-        if (code.description or "").strip():
-            ET.SubElement(code_elem, "Description").text = code.description.strip()
+        for code in group:
+            code_elem = ET.SubElement(parent, "Code", {
+                "guid": str(uuid.uuid4()),
+                "name": code.label,
+                "isCodable": "true",
+            })
+            if (code.description or "").strip():
+                ET.SubElement(code_elem, "Description").text = code.description.strip()
     ET.indent(root, space="  ")
     buf = io.BytesIO()
     ET.ElementTree(root).write(buf, encoding="utf-8", xml_declaration=True)
@@ -257,13 +290,19 @@ def export_qdpx_bytes(run: Run, db) -> bytes:
                   {"guid": user_guid, "name": "Autocode"})
 
     codes_elem = ET.SubElement(ET.SubElement(root, tag("CodeBook")), tag("Codes"))
-    for cid, code in all_codes.items():
-        ce = ET.SubElement(codes_elem, tag("Code"), {
-            "guid": code_guid_map[cid], "name": code.label,
-            "isCodable": "true", "color": "#0000a5",
+    for cluster, group in _grouped_codes(all_codes.values()):
+        # a cluster becomes a non-codable parent code: grouping only, never assigned
+        parent = codes_elem if cluster is None else ET.SubElement(codes_elem, tag("Code"), {
+            "guid": str(uuid.uuid4()).upper(), "name": cluster,
+            "isCodable": "false", "color": "#7a7a7a",
         })
-        if (code.description or "").strip():
-            ET.SubElement(ce, tag("Description")).text = code.description.strip()
+        for code in group:
+            ce = ET.SubElement(parent, tag("Code"), {
+                "guid": code_guid_map[code.id], "name": code.label,
+                "isCodable": "true", "color": "#0000a5",
+            })
+            if (code.description or "").strip():
+                ET.SubElement(ce, tag("Description")).text = code.description.strip()
 
     sources_elem = ET.SubElement(root, tag("Sources"))
     source_files = {}  # archive path → bytes

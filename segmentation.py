@@ -118,6 +118,20 @@ def load_document_text(path: str | Path) -> str:
     return load_docx_text(path)
 
 
+def read_survey_excel(path: str | Path, sheet=0):
+    """
+    Single entry point for reading a survey workbook.
+
+    pandas' default NA table swallows respondent answers that happen to be
+    spelled like a missing-value token — a participant who literally types
+    'N/A', 'NA', 'null' or 'None' would silently vanish from the corpus, and
+    on a survey those are answers, not gaps. keep_default_na=False keeps every
+    cell as written; genuinely empty cells arrive as '' and are filtered by the
+    callers, which is the only emptiness we want to act on.
+    """
+    return pd.read_excel(path, sheet_name=sheet, keep_default_na=False)
+
+
 def load_excel_cells(path: str | Path, sheet: str | None, column: str,
                      group_column: str | None = None,
                      group_value: str | None = None) -> list[tuple[int, str]]:
@@ -130,7 +144,7 @@ def load_excel_cells(path: str | Path, sheet: str | None, column: str,
     the rows whose group_column equals group_value are returned — this is how a
     text column is split into one document per group at import.
     """
-    df = pd.read_excel(path, sheet_name=sheet if sheet else 0)
+    df = read_survey_excel(path, sheet if sheet else 0)
     if column not in df.columns:
         raise ValueError(f"Column not found: {column}")
     gcol = df[group_column] if (group_column and group_column in df.columns) else None
@@ -170,7 +184,7 @@ def document_fulltext(doc) -> str:
 
 def inspect_excel(path: str | Path) -> dict:
     """Sheets, columns and sample values for the upload column picker."""
-    sheets = pd.read_excel(path, sheet_name=None)
+    sheets = read_survey_excel(path, sheet=None)
     out = {}
     for name, df in sheets.items():
         cols = []

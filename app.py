@@ -307,6 +307,7 @@ def page_codebook(request: Request, workspace_id: int, db: Session = Depends(get
     codes = (db.query(Code)
              .filter(Code.workspace_id == ws.id, Code.is_deleted == False)
              .order_by(Code.label).all())
+    codes.sort(key=_cluster_sort_key)  # cluster first, uncategorised last
     counts = dict(
         db.query(Coding.code_id, func.count(Coding.id))
         .join(Run, Run.id == Coding.run_id)
@@ -314,7 +315,8 @@ def page_codebook(request: Request, workspace_id: int, db: Session = Depends(get
         .group_by(Coding.code_id).all())
     return render(request, "workspace_codebook.html", user, ws=ws,
                   is_owner=(user.is_admin or ws.owner_id == user.id),
-                  codes=codes, counts=counts, expr_counts=_expression_counts(ws, db))
+                  codes=codes, counts=counts, expr_counts=_expression_counts(ws, db),
+                  clusters=_clusters_in(ws, db))
 
 
 @app.get("/workspace/{workspace_id}/codes/{code_id}", response_class=HTMLResponse)
@@ -875,12 +877,12 @@ def api_excel_confirm(workspace_id: int, data: ExcelConfirmIn,
     final = ws_dir / f"xlsx_{uuid4().hex}.xlsx"
     tmp.rename(final)
 
-    from segmentation import load_excel_cells
+    from segmentation import load_excel_cells, read_survey_excel
     # optional per-row group column: split each text column into one document per
     # distinct group value, so the existing per-document group machinery applies
     splits: list[tuple[str | None, str | None]] = [(None, None)]
     if data.group_column:
-        gdf = pd.read_excel(final, sheet_name=data.sheet)
+        gdf = read_survey_excel(final, data.sheet)
         values = sorted({("" if pd.isna(v) else str(v).strip()) for v in gdf[data.group_column]})
         if len(values) > MAX_GROUP_VALUES:
             final.unlink(missing_ok=True)
@@ -1138,6 +1140,7 @@ def api_segmentation_preview(workspace_id: int, data: PreviewIn,
 
 class CodeIn(BaseModel):
     label: str
+    cluster: str | None = None
     description: str | None = None
     example: str | None = None
     expressions: dict[str, list[str]] | None = None  # import only
@@ -1145,6 +1148,18 @@ class CodeIn(BaseModel):
 
 def _active_codes(ws: Workspace, db: Session) -> list[Code]:
     return db.query(Code).filter(Code.workspace_id == ws.id, Code.is_deleted == False).all()
+
+
+def _clusters_in(ws: Workspace, db: Session) -> list[str]:
+    """Distinct cluster names in use, for the datalist on the add/edit forms."""
+    return sorted({c.cluster.strip() for c in _active_codes(ws, db) if (c.cluster or "").strip()},
+                  key=str.lower)
+
+
+def _cluster_sort_key(code: Code) -> tuple:
+    """Group by cluster, uncategorised last, alphabetical within the group."""
+    cluster = (code.cluster or "").strip()
+    return (1 if not cluster else 0, cluster.lower(), code.label.lower())
 
 
 def _has_expressions(ws: Workspace, db: Session) -> bool:
@@ -1168,6 +1183,7 @@ def api_add_code(workspace_id: int, data: CodeIn,
     if bad:
         raise HTTPException(status_code=400, detail=f"Unsupported languages: {', '.join(bad)}")
     code = Code(workspace_id=ws.id, label=label,
+                cluster=(data.cluster or "").strip() or None,
                 description=(data.description or "").strip() or None,
                 example=(data.example or "").strip() or None,
                 created_by_id=user.id, updated_by_id=user.id)
@@ -1195,6 +1211,7 @@ def api_update_code(code_id: int, data: CodeIn,
     if clash:
         raise HTTPException(status_code=400, detail="A code with this label already exists")
     code.label = label
+    code.cluster = (data.cluster or "").strip() or None
     code.description = (data.description or "").strip() or None
     code.example = (data.example or "").strip() or None
     code.updated_by_id = user.id
@@ -1307,17 +1324,21 @@ def _parse_codebook_excel(content: bytes) -> list[dict]:
         label = str(r[cols["code"]]).strip()
         if not label or label.lower() == "nan":
             continue
-        def _cell(key):
-            if key not in cols:
-                return None
-            v = str(r[cols[key]]).strip()
-            return v if v and v.lower() != "nan" else None
+        def _cell(*keys):
+            for key in keys:
+                if key not in cols:
+                    continue
+                v = str(r[cols[key]]).strip()
+                if v and v.lower() != "nan":
+                    return v
+            return None
         expressions = {}
         for lang in SPACY_MODELS:
             v = _cell(f"expressions_{lang}")
             if v:
                 expressions[lang] = [e.strip() for e in v.split(";") if e.strip()]
-        rows.append({"label": label, "description": _cell("description"),
+        rows.append({"label": label, "cluster": _cell("code cluster", "cluster"),
+                     "description": _cell("description"),
                      "example": _cell("example"), "expressions": expressions})
     return rows
 
@@ -1364,6 +1385,7 @@ def api_codebook_import(workspace_id: int, data: ImportIn,
             skipped += 1
             continue
         code = Code(workspace_id=ws.id, label=label,
+                    cluster=(row.cluster or "").strip() or None,
                     description=(row.description or "").strip() or None,
                     example=(row.example or "").strip() or None,
                     created_by_id=user.id, updated_by_id=user.id)
