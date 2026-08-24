@@ -34,9 +34,11 @@ import conventions
 import dictionary
 import exports
 import totp
-from auth import (create_pending_token, create_token, get_current_user,
-                  get_pending_user, get_user_or_none, hash_password, require_admin,
-                  verify_password)
+from auth import (
+    AUTH_MODE, BORANT_LOGOUT_URL, create_pending_token, create_token, gateway_mode,
+    get_current_user, get_pending_user, get_user_or_none, hash_password,
+    require_admin, verify_password,
+)
 from crypto import decrypt_api_key, encrypt_api_key, mask_api_key
 from models import (PRICING, Code, CodeExpression, Coding, Document, Run,
                     RunDocument, RunSegment, SessionLocal, User, UserCostLog,
@@ -51,6 +53,16 @@ DOCX_SEG_MODES = {"document", "utterance_regex", "paragraph", "sentence"}
 EXCEL_SEG_MODES = {"cell", "sentence"}
 
 app = FastAPI(title="Autocode")
+@app.get("/healthz")
+def healthz():
+    """Liveness, e sta fuori da qualunque gate.
+
+    Non e' monitoraggio: dice che il processo risponde, non che una run di
+    codifica sia andata a buon fine.
+    """
+    return {"ok": True, "mode": AUTH_MODE}
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/imgs", StaticFiles(directory="imgs"), name="imgs")
 templates = Jinja2Templates(directory="templates")
@@ -128,6 +140,11 @@ class LoginIn(BaseModel):
 
 @app.post("/api/auth/register")
 def api_register(data: RegisterIn, db: Session = Depends(get_db)):
+    # In gateway l'iscrizione locale e' chiusa: lasciarla aperta vorrebbe dire
+    # due anagrafiche in parallelo, e chi si iscrive qui non passerebbe mai dal
+    # gate. Chi deve entrare riceve un account la' e un grant su questa app.
+    if gateway_mode():
+        raise HTTPException(status_code=403, detail="err_registration_closed")
     email = data.email.strip().lower()
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         raise HTTPException(status_code=400, detail="invalid_email")
@@ -146,6 +163,11 @@ def api_register(data: RegisterIn, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/login")
 def api_login(data: LoginIn, db: Session = Depends(get_db)):
+    # L'app spegne il proprio login da se' invece di affidarsi al proxy per
+    # nasconderlo: conosce la propria modalita' meglio del reverse proxy, e la
+    # stessa immagine si comporta bene ovunque la si metta.
+    if gateway_mode():
+        raise HTTPException(status_code=403, detail="err_login_via_gateway")
     user = db.query(User).filter(User.email == data.email.strip().lower(), User.is_active == True).first()
     if not user or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="err_invalid_login")
@@ -223,7 +245,13 @@ def api_2fa_verify(data: TotpCodeIn, request: Request, db: Session = Depends(get
 
 @app.post("/api/auth/logout")
 def api_logout():
-    resp = JSONResponse({"ok": True})
+    # Buttare il cookie locale non e' uscire, se la sessione la tiene il gate:
+    # al click dopo si rientra. Si restituisce dove mandare il browser, e il
+    # bersaglio e' la GET /logout del gate, che **chiede** — a revocare e' la
+    # POST, e deve restare una POST o un <img src> su un sito qualunque
+    # butterebbe fuori chi lo guarda.
+    resp = JSONResponse({"ok": True,
+                         "redirect": BORANT_LOGOUT_URL if gateway_mode() else "/"})
     resp.delete_cookie("session")
     return resp
 
@@ -234,7 +262,7 @@ def api_logout():
 
 @app.get("/", response_class=HTMLResponse)
 def page_home(request: Request, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return render(request, "login.html")
     owned = db.query(Workspace).filter(Workspace.owner_id == user.id).all()
@@ -248,8 +276,13 @@ def page_home(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/2fa", response_class=HTMLResponse)
 def page_2fa(request: Request, db: Session = Depends(get_db)):
+    # In gateway il secondo fattore lo chiede il gate, con una policy
+    # `two_factor` su `/`: questa pagina resterebbe un secondo TOTP in fila al
+    # primo, che e' esattamente cio' che l'SSO esiste per togliere.
+    if gateway_mode():
+        return RedirectResponse("/", status_code=302)
     cookie = request.cookies.get("session")
-    if get_user_or_none(cookie, db):  # already fully authenticated
+    if get_user_or_none(cookie, db, request):  # already fully authenticated
         return RedirectResponse("/", status_code=302)
     user = get_pending_user(cookie, db)
     if not user:  # no pending session → back to login
@@ -258,7 +291,7 @@ def page_2fa(request: Request, db: Session = Depends(get_db)):
 
 
 def _workspace_page(request: Request, workspace_id: int, template: str, db: Session, **extra):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -268,7 +301,7 @@ def _workspace_page(request: Request, workspace_id: int, template: str, db: Sess
 
 @app.get("/workspace/{workspace_id}", response_class=HTMLResponse)
 def page_workspace(request: Request, workspace_id: int, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -286,7 +319,7 @@ def page_workspace(request: Request, workspace_id: int, db: Session = Depends(ge
 
 @app.get("/workspace/{workspace_id}/corpus", response_class=HTMLResponse)
 def page_corpus(request: Request, workspace_id: int, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -300,7 +333,7 @@ def page_corpus(request: Request, workspace_id: int, db: Session = Depends(get_d
 
 @app.get("/workspace/{workspace_id}/codebook", response_class=HTMLResponse)
 def page_codebook(request: Request, workspace_id: int, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -322,7 +355,7 @@ def page_codebook(request: Request, workspace_id: int, db: Session = Depends(get
 @app.get("/workspace/{workspace_id}/codes/{code_id}", response_class=HTMLResponse)
 def page_code_extracts(request: Request, workspace_id: int, code_id: int,
                        run_id: int | None = None, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -347,7 +380,7 @@ def page_code_extracts(request: Request, workspace_id: int, code_id: int,
 
 @app.get("/workspace/{workspace_id}/settings", response_class=HTMLResponse)
 def page_settings(request: Request, workspace_id: int, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -363,7 +396,7 @@ def page_settings(request: Request, workspace_id: int, db: Session = Depends(get
 @app.get("/workspace/{workspace_id}/runs/{run_id}/analysis", response_class=HTMLResponse)
 def page_run_analysis(request: Request, workspace_id: int, run_id: int,
                       recompute: int = 0, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -396,7 +429,7 @@ def page_run_analysis(request: Request, workspace_id: int, run_id: int,
 
 @app.get("/workspace/{workspace_id}/runs", response_class=HTMLResponse)
 def page_runs(request: Request, workspace_id: int, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -427,7 +460,7 @@ def page_runs(request: Request, workspace_id: int, db: Session = Depends(get_db)
 @app.get("/workspace/{workspace_id}/runs/{run_id}", response_class=HTMLResponse)
 def page_run_detail(request: Request, workspace_id: int, run_id: int,
                     db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
@@ -458,7 +491,7 @@ def page_guide(request: Request):
 
 @app.get("/profile", response_class=HTMLResponse)
 def page_profile(request: Request, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     masked = None
@@ -472,7 +505,7 @@ def page_profile(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/admin", response_class=HTMLResponse)
 def page_admin(request: Request, db: Session = Depends(get_db)):
-    user = get_user_or_none(request.cookies.get("session"), db)
+    user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
         return RedirectResponse("/", status_code=302)
     if not user.is_admin:

@@ -47,6 +47,10 @@ class User(Base):
     backup_codes_json = Column(Text, nullable=True)     # sha256 hashes of unused backup codes
     is_admin          = Column(Boolean, default=False)
     is_active         = Column(Boolean, default=True)
+    # Il subject con cui un gate SSO conosce questa persona. NULL finche' non lo
+    # si lega a mano con map_borant.py, e in AUTH_MODE=local non lo legge
+    # nessuno.
+    borant_sub        = Column(String, unique=True, nullable=True)
     created_at        = Column(DateTime, default=datetime.utcnow)
 
     owned_workspaces = relationship("Workspace", back_populates="owner")
@@ -317,6 +321,11 @@ def init_db():
             "ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0",
             "ALTER TABLE users ADD COLUMN backup_codes_json TEXT",
             "ALTER TABLE codes ADD COLUMN cluster VARCHAR",
+            # 2026-08-24. ALTER TABLE non accetta UNIQUE, quindi il vincolo
+            # arriva come indice parziale a parte.
+            "ALTER TABLE users ADD COLUMN borant_sub VARCHAR",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_borant_sub "
+            "ON users(borant_sub) WHERE borant_sub IS NOT NULL",
         ]:
             try:
                 conn.execute(text(stmt))
