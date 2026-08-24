@@ -3,9 +3,11 @@ Phase 1 smoke test — exercises the full HTTP surface in-process via TestClient
 Run from deploy/:  python smoke_test.py
 Uses a throwaway DB (data/test.db) and upload dir, both removed at the end.
 """
+import io as _io
 import os
 import shutil
 import sys
+import zipfile as _zip
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -17,6 +19,7 @@ if not os.environ["FERNET_KEY"]:
     os.environ["FERNET_KEY"] = Fernet.generate_key().decode()
 os.environ["DATABASE_URL"] = "sqlite:///./data/test.db"
 os.environ["UPLOAD_DIR"] = "data/test_uploads"
+os.environ.setdefault("PUBLIC_URL", "http://testserver")
 
 Path("data").mkdir(exist_ok=True)
 for p in ("data/test.db", "data/test_uploads"):
@@ -27,6 +30,7 @@ for p in ("data/test.db", "data/test_uploads"):
 
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
+from models import RunSegment as _Seg  # noqa: E402
 
 client = TestClient(app_module.app)
 FAILED = []
@@ -396,7 +400,6 @@ if docx_path.exists():
     check("docx unit snapshotted from workspace", _r1.granularity == "utterance_regex",
           _r1.granularity)
     check("codings created", data["n_codings"] > 0, str(data))
-    from models import RunSegment as _Seg
     db = SessionLocal()
     segs1 = db.query(_Seg).filter(_Seg.run_id == run_id).all()
     db.close()
@@ -441,8 +444,6 @@ if docx_path.exists():
     check("cost log on profile", r.status_code == 200 and "#" + str(run_id) in r.text)
 
     print("== phase 3: exports + review ==")
-    import io as _io
-    import zipfile as _zip
     r = client.get(f"/api/runs/{run_id}/export/xlsx")
     check("export xlsx", r.status_code == 200 and r.content[:2] == b"PK")
     import pandas as _pd_xl
@@ -1325,7 +1326,7 @@ r = client.get(f"/workspace/{sws}/corpus")
 check("setup button uses dataset (no quoting bug)",
       "openSetup(" in r.text and "this.dataset.name" in r.text
       and "How transcript conventions work" in r.text and "th-sort" in r.text)
-r = client.get("/")
+r = client.get("/app")
 check("workspace creation help modal (input type only; seg moved to run form)",
       "Corpus type" in r.text and "Segmentation mode (coding unit)" not in r.text
       and "ws-regex" not in r.text)
@@ -1381,6 +1382,313 @@ r = dictuser.delete(f"/api/workspaces/{dws}")
 check("cleanup dict workspace", r.status_code == 200)
 dict_survey.unlink(missing_ok=True)
 imp_path.unlink(missing_ok=True)
+
+print("== mcp surface ==")
+import json
+import auth as _auth
+import mcp_app as _mcp
+from models import ApiKey as _ApiKey, Run as _McpRun, Workspace as _McpWs
+
+r = client.post("/api/profile/mcp-keys", json={"name": "laptop"})
+check("mint an mcp key", r.status_code == 200 and r.json()["key"].startswith("ac_"), r.text)
+mcp_key = r.json()["key"]
+r = client.get("/profile")
+check("profile lists the key", mcp_key in r.text)
+
+# The transport needs the lifespan to have run, which a bare TestClient skips.
+mcp_http = TestClient(app_module.app)
+mcp_http.__enter__()
+_MCP_HEADERS = {"Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json"}
+
+
+def rpc(method, params=None, key=None, path="/mcp/"):
+    h = dict(_MCP_HEADERS)
+    if key:
+        h["X-API-Key"] = key
+    body = {"jsonrpc": "2.0", "id": 1, "method": method}
+    if params is not None:
+        body["params"] = params
+    return mcp_http.post(path, json=body, headers=h)
+
+
+def rpc_call(name, args, key=None):
+    r = rpc("tools/call", {"name": name, "arguments": args}, key=key or mcp_key)
+    return r, json.loads(r.json()["result"]["content"][0]["text"])
+
+
+r = rpc("tools/list", {})
+check("mcp refuses without a key", r.status_code == 401, r.text[:120])
+r = rpc("tools/list", {}, key="ac_nonsense")
+check("mcp refuses an unknown key", r.status_code == 401)
+r = rpc("tools/list", {}, key=mcp_key)
+tool_names = [t["name"] for t in r.json()["result"]["tools"]]
+check("tools/list over http", r.status_code == 200 and "start_run" in tool_names
+      and "get_codebook" in tool_names, str(tool_names)[:200])
+r = rpc("tools/list", {}, path=f"/mcp/k/{mcp_key}/")
+check("the key travels in the path too", r.status_code == 200
+      and "tools" in r.json().get("result", {}))
+r, payload = rpc_call("list_workspaces", {})
+check("tools/call over http", r.status_code == 200 and payload["you"] == "Test Owner",
+      str(payload)[:200])
+
+# A key belonging to a disabled account is refused: deactivating a person has to
+# close every door, not only the browser one.
+db = SessionLocal()
+_dead = db.query(User).filter(User.email == "member@test.dev").first()
+db.add(_ApiKey(user_id=_dead.id, name="ghost", key="ac_ghostkey"))
+db.commit()
+db.close()
+r = rpc("tools/list", {}, key="ac_ghostkey")
+check("a disabled user's key is refused", r.status_code == 401)
+
+db = SessionLocal()
+_k = db.query(_ApiKey).filter(_ApiKey.key == mcp_key).first()
+check("last_used_at stamped by the calls above", _k.last_used_at is not None)
+db.close()
+r = client.post("/api/profile/mcp-keys", json={"name": "throwaway"})
+throwaway = r.json()["key"]
+r = client.delete(f"/api/profile/mcp-keys/{r.json()['id']}")
+check("revoke a key", r.status_code == 200)
+r = rpc("tools/list", {}, key=throwaway)
+check("a revoked key is refused", r.status_code == 401)
+
+# ── the tools themselves, called directly under an explicit caller ───────────
+db = SessionLocal()
+owner_user = db.query(User).filter(User.email == "owner@test.dev").first()
+db.expunge(owner_user)
+db.close()
+_auth.set_caller(owner_user)
+
+out = _mcp.create_workspace("From the chat", description="made over mcp",
+                            study_context="Survey on treatment decisions",
+                            input_type="excel")
+check("create_workspace works", out.get("ok") and out.get("id"), str(out)[:200])
+mws = out["id"]
+db = SessionLocal()
+_nw = db.query(_McpWs).filter(_McpWs.id == mws).first()
+check("a workspace created over mcp is owned and joined by its creator",
+      _nw.owner_id == owner_user.id and any(m.user_id == owner_user.id for m in _nw.members))
+db.close()
+out = _mcp.create_workspace("", input_type="excel")
+check("a nameless workspace is refused", "error" in out, str(out)[:120])
+out = _mcp.create_workspace("Bad type", input_type="pdf")
+check("an unknown input type is refused", "error" in out, str(out)[:120])
+
+# The corpus still arrives through the web app: files are binary, and uploading
+# is deliberately not part of the model surface.
+mcp_xlsx = Path("data/test_mcp_survey.xlsx")
+_pd.DataFrame({"ID": [1, 2, 3],
+               "answer": ["I wanted to choose for myself.",
+                          "My doctor listened to me.",
+                          "The coffee was terrible."]}).to_excel(mcp_xlsx, index=False)
+with mcp_xlsx.open("rb") as f:
+    r = client.post(f"/api/workspaces/{mws}/excel/inspect",
+                    files={"file": ("mcp.xlsx", f, "application/vnd.ms-excel")})
+_x = r.json()
+_sheet = list(_x["sheets"].keys())[0]
+r = client.post(f"/api/workspaces/{mws}/excel/confirm",
+                json={"token": _x["token"], "filename": "mcp.xlsx",
+                      "sheet": _sheet, "columns": ["answer"]})
+check("corpus uploaded for the mcp section", r.status_code == 200, r.text)
+db = SessionLocal()
+mdoc = db.query(_Doc2).filter(_Doc2.workspace_id == mws).first()
+db.close()
+
+out = _mcp.get_workspace(str(mws))
+check("get_workspace by id", out.get("name") == "From the chat" and "ready" in out, str(out)[:200])
+check("get_workspace counts the corpus it can see",
+      out["corpus"]["documents"] == 1, str(out.get("corpus"))[:200])
+check("get_workspace reports what would block a run",
+      isinstance(out["ready"]["blockers"], list), str(out.get("ready"))[:200])
+out2 = _mcp.get_workspace("From the chat")
+check("a workspace resolves by name too", out2.get("id") == mws, str(out2)[:120])
+out = _mcp.get_workspace("does not exist")
+check("unknown workspace is an error, not a crash", "error" in out, str(out)[:120])
+
+out = _mcp.list_documents(str(mws))
+check("list_documents shows the column document",
+      out["count"] == 1 and "[answer]" in out["documents"][0]["name"], str(out)[:200])
+
+r = client.post("/api/workspaces", json={"name": "Ambiguous alpha"})
+amb1 = r.json()["id"]
+r = client.post("/api/workspaces", json={"name": "Ambiguous beta"})
+amb2 = r.json()["id"]
+out = _mcp.get_workspace("Ambiguous")
+check("an ambiguous name is refused with the candidates",
+      "error" in out and "matches 2" in out["error"], str(out)[:200])
+
+out = _mcp.add_codes(str(mws), [
+    {"label": "autonomy", "description": "Deciding for oneself"},
+    {"label": "trust", "cluster": "relational", "description": "Trust in clinicians"},
+    {"label": "shared decision", "expressions": {"en": ["decide together", "we decided"]}},
+])
+check("add_codes takes a whole draft in one call", len(out["created"]) == 3, str(out)[:200])
+autonomy_id = [c["id"] for c in out["created"] if c["label"] == "autonomy"][0]
+trust_id = [c["id"] for c in out["created"] if c["label"] == "trust"][0]
+sd_id = [c["id"] for c in out["created"] if c["label"] == "shared decision"][0]
+out = _mcp.add_codes(str(mws), [{"label": "Autonomy", "description": "same code, other spelling"}])
+check("add_codes skips a label that already exists (case/format blind)",
+      out["created"] == [] and out["skipped_existing"] == ["Autonomy"], str(out)[:200])
+out = _mcp.add_codes(str(mws), [{"label": "bad", "expressions": {"xx": ["nope"]}}])
+check("a code with an unsupported language is rejected, not half-created",
+      out["created"] == [] and out.get("rejected"), str(out)[:200])
+
+out = _mcp.get_codebook(str(mws), with_expressions=True)
+labels = [c["label"] for c in out["codes"]]
+check("get_codebook lists them", "trust" in labels and "shared decision" in labels, str(labels))
+sd = [c for c in out["codes"] if c["label"] == "shared decision"][0]
+check("expressions come back per language",
+      sd["expressions"]["en"] == ["decide together", "we decided"], str(sd))
+out = _mcp.get_codebook(str(mws), cluster="relational")
+check("codebook filters by cluster",
+      [c["label"] for c in out["codes"]] == ["trust"], str(out)[:200])
+
+out = _mcp.set_expressions(sd_id, {"en": ["decide together"], "it": ["decidere insieme"]})
+check("set_expressions replaces, not merges", out.get("expressions") == 2, str(out)[:200])
+out = _mcp.set_expressions(sd_id, {"xx": ["nope"]})
+check("an unsupported language is refused", "error" in out, str(out)[:120])
+
+out = _mcp.update_code(trust_id, description="Trust in clinicians and institutions")
+check("update_code edits one field",
+      (out.get("description") or "").endswith("institutions"), str(out)[:200])
+out = _mcp.update_code(trust_id, cluster="-")
+check("a dash clears a field", out.get("cluster") is None, str(out)[:200])
+out = _mcp.update_code(trust_id, label="autonomy")
+check("update_code refuses a colliding label", "error" in out, str(out)[:120])
+
+out = _mcp.delete_code(sd_id)
+check("delete_code is soft and says what it kept",
+      out.get("ok") and "kept_codings" in out, str(out)[:150])
+check("a deleted code leaves the active codebook",
+      "shared decision" not in [c["label"] for c in _mcp.get_codebook(str(mws))["codes"]])
+
+# ── runs: estimate is free, start spends, and both refuse the same bad input ──
+out = _mcp.estimate_run(str(mws), [mdoc.id])
+check("estimate_run costs nothing and answers",
+      out.get("segments") == 3 and out.get("cost_usd", 0) > 0, str(out)[:200])
+out = _mcp.estimate_run(str(mws), [mdoc.id], unit="paragraph")
+check("estimate_run refuses a unit this corpus cannot have", "error" in out, str(out)[:150])
+out = _mcp.start_run(str(mws), [mdoc.id], excluded_roles=["nobody"])
+check("start_run refuses an unknown role", "error" in out, str(out)[:150])
+out = _mcp.start_run(str(mws), [mdoc.id], model="claude-imaginary-9")
+check("start_run refuses an unknown model", "error" in out, str(out)[:150])
+out = _mcp.start_run(str(mws), [])
+check("start_run refuses an empty selection", "error" in out, str(out)[:150])
+
+# Both fakes were restored above; this section needs them back — the run must
+# not reach Anthropic, and the analysis must not try to load a spaCy model.
+coding.call_claude_with_retry = _fake_call
+coding.anthropic.Anthropic = lambda api_key: _FakeAnthropicClient()
+dict_mod._get_nlp = lambda lang: _FakeDoc
+_call_count["n"] = 0
+out = _mcp.start_run(str(mws), [mdoc.id], max_workers=1)
+check("start_run launches", out.get("ok") and out.get("run_id"), str(out)[:200])
+mcp_run = out["run_id"]
+for _ in range(200):
+    st = _mcp.get_run(mcp_run)
+    if st["status"] in ("completed", "failed"):
+        break
+    _time.sleep(0.1)
+check("a run started from mcp completes", st["status"] == "completed", str(st)[:250])
+check("get_run reports coverage, not only the positive half",
+      st["segments"] == 3 and st["uncoded"] == 1, str(st)[:250])
+check("get_run surfaces the codes the model proposed",
+      len(st["proposed_codes"]) == 1, str(st.get("proposed_codes"))[:200])
+db = SessionLocal()
+_mr = db.query(_McpRun).filter(_McpRun.id == mcp_run).first()
+check("the run is billed to the key's owner", _mr.created_by_id == owner_user.id)
+check("excel corpora get no sequential context", _mr.context_window == 0)
+db.close()
+
+out = _mcp.get_extracts(autonomy_id, run_id=mcp_run)
+check("get_extracts returns coded text with its rationale",
+      out.get("count") == 1 and out["extracts"][0]["rationale"], str(out)[:250])
+out = _mcp.get_extracts(autonomy_id)
+check("get_extracts without a run spans the workspace", out.get("count") == 1, str(out)[:150])
+out = _mcp.get_extracts(autonomy_id, uncoded=True)
+check("the uncoded side needs a run to be a question at all", "error" in out, str(out)[:150])
+out = _mcp.get_extracts(autonomy_id, run_id=mcp_run, uncoded=True)
+check("uncoded units come back with the reason the model gave",
+      out.get("mode") == "uncoded" and out["count"] == 1
+      and out["segments"][0]["rationale"], str(out)[:250])
+
+out = _mcp.get_analysis(mcp_run)
+for _ in range(400):
+    if out.get("status") != "computing":
+        break
+    _time.sleep(0.05)
+    out = _mcp.get_analysis(mcp_run)
+check("get_analysis returns the computed blocks",
+      "meta" in out and isinstance(out.get("codes"), list), str(out)[:200])
+out = _mcp.get_analysis(mcp_run, section="bogus")
+check("an unknown analysis section is refused", "error" in out, str(out)[:120])
+out = _mcp.get_analysis(mcp_run, section="codes")
+check("one section comes back in full", isinstance(out.get("data"), list), str(out)[:150])
+
+out = _mcp.list_runs(str(mws))
+check("list_runs finds it", any(r_["id"] == mcp_run for r_ in out["runs"]), str(out)[:200])
+
+coding.call_claude_with_retry = _real_call
+coding.anthropic.Anthropic = _real_anthropic_cls
+dict_mod._get_nlp = _real_get_nlp
+
+# ── reach: a key reaches exactly what its owner reaches ──────────────────────
+stranger = TestClient(app_module.app)
+stranger.post("/api/auth/register", json={"name": "Stranger", "email": "stranger@test.dev",
+                                          "password": "password123"})
+enroll_2fa(stranger)
+db = SessionLocal()
+stranger_user = db.query(User).filter(User.email == "stranger@test.dev").first()
+db.expunge(stranger_user)
+db.close()
+
+_auth.set_caller(stranger_user)
+out = _mcp.list_workspaces()
+check("a stranger's key sees none of the owner's workspaces",
+      all(w["id"] != mws for w in out["workspaces"]), str(out)[:200])
+out = _mcp.get_workspace(str(mws))
+check("an unreachable workspace reads as not found, never as forbidden",
+      "error" in out and "No workspace" in out["error"], str(out)[:150])
+out = _mcp.get_workspace("From the chat")
+check("and it cannot be found by name either", "error" in out, str(out)[:150])
+out = _mcp.add_codes(str(mws), [{"label": "intrusion"}])
+check("nor written to", "error" in out, str(out)[:150])
+out = _mcp.get_run(mcp_run)
+check("nor read through one of its runs", "error" in out, str(out)[:150])
+out = _mcp.get_extracts(autonomy_id)
+check("nor through one of its codes", "error" in out, str(out)[:150])
+
+# membership is read and write; owning is what invites and rewrites the study
+r = client.post(f"/api/workspaces/{mws}/members", json={"email": "stranger@test.dev"})
+check("owner adds the stranger as a member", r.status_code == 200, r.text)
+_auth.set_caller(stranger_user)
+out = _mcp.get_workspace(str(mws))
+check("a member reaches the workspace", out.get("id") == mws, str(out)[:150])
+out = _mcp.add_codes(str(mws), [{"label": "from a member"}])
+check("a member may write to the codebook", len(out.get("created", [])) == 1, str(out)[:150])
+out = _mcp.update_workspace(str(mws), study_context="rewritten by a member")
+check("a member cannot rewrite the study context",
+      "error" in out and "owner" in out["error"], str(out)[:200])
+out = _mcp.add_member(str(mws), "dict@test.dev")
+check("a member cannot invite", "error" in out, str(out)[:150])
+
+_auth.set_caller(owner_user)
+out = _mcp.update_workspace(str(mws), study_context="Survey on treatment decisions, pilot")
+check("the owner can", out.get("changed") == ["study_context"], str(out)[:200])
+out = _mcp.add_member(str(amb1), "stranger@test.dev")
+check("the owner invites a registered person", out.get("member") == "Stranger", str(out)[:150])
+out = _mcp.add_member(str(amb1), "nobody@test.dev")
+check("an unknown address is refused", "error" in out, str(out)[:150])
+
+_auth.set_caller(None)
+out = _mcp.list_workspaces()
+check("with no caller resolved, nothing is served", "error" in out, str(out)[:120])
+
+for _w in (mws, amb1, amb2):
+    client.delete(f"/api/workspaces/{_w}")
+mcp_xlsx.unlink(missing_ok=True)
+mcp_http.__exit__(None, None, None)
 
 print("== duplicate workspace ==")
 from models import (Document as _DupDoc, Code as _DupCode, Run as _DupRun,

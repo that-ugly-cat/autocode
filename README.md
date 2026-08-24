@@ -33,6 +33,11 @@ deterministic multilingual dictionary engine. Results export to Excel, `.qdc`, a
   (`.autocorpus`) for backup/transfer between workspaces.
 - **Security**: JWT httpOnly cookie auth, bcrypt passwords, mandatory TOTP 2FA, Fernet-
   encrypted per-user Anthropic API keys.
+- **Model surface (MCP)**: an AI assistant can list workspaces, read and write the codebook,
+  estimate and start runs, and read back extracts with their rationale — from inside the
+  conversation where the codebook is being reasoned about. A key carries an identity, so it
+  reaches exactly the workspaces its owner is a member of, and spends only its owner's
+  Anthropic key. Mint one from **Profile → Model access**.
 
 ## Quick start
 
@@ -54,8 +59,10 @@ FastAPI · SQLite (SQLAlchemy) · Jinja2 + vanilla JS (AJAX polling, no framewor
 Claude (Anthropic SDK) for the LLM engine.
 
 ```
-app.py            — routes
-auth.py           — JWT + bcrypt + TOTP (2FA)
+app.py            — routes, /mcp mount, per-user API key gate
+mcp_app.py        — the model-facing surface (MCP tools)
+runs.py           — run launch rules, shared by the web form and MCP
+auth.py           — JWT + bcrypt + TOTP (2FA) + the MCP caller
 coding.py         — LLM coding engine (background run thread)
 dictionary.py     — dictionary coding engine (lemma matching)
 conventions.py    — speaker convention detection/parsing
@@ -76,6 +83,12 @@ backups.
 - SQLite + uploaded files live under `data/` — back up by copying the folder.
 - 2FA (TOTP) is mandatory for all users; the first admin is created via `seed_admin.py`, not
   through self-registration.
+- `/mcp` authenticates with its own per-user key and never with the session cookie: a model
+  client has no browser, and a redirect to a login page is the one thing it cannot handle.
+  Set `PUBLIC_URL` in production or the transport refuses the proxied Host.
+- Personal data lives in `users` (name, email, hashed password, encrypted keys),
+  `documents` + the files under `data/uploads` (the corpus itself), and `codings` /
+  `run_segments` (excerpts of it). A deletion request touches those.
 
 ## License
 

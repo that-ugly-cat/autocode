@@ -12,6 +12,7 @@ the dictionary engine works offline).
 | `FERNET_KEY` | **yes, in production** | `change-me-in-production` | encrypts per-user Anthropic API keys and TOTP secrets at rest |
 | `DATABASE_URL` | no | `sqlite:////app/data/autocode.db` | SQLite path |
 | `UPLOAD_DIR` | no | `/app/data/uploads` | corpus file storage |
+| `PUBLIC_URL` | **behind a proxy** | `http://localhost:8007` | public origin; the MCP transport refuses any other Host |
 
 Generate the keys:
 
@@ -80,6 +81,27 @@ tar czf backup-uploads-$(date +%F).tar.gz data/uploads
 
 SQLite is a single file — copying it (plus the uploads folder) is enough.
 
+## The model surface (`/mcp`)
+
+AutoCode speaks MCP at **`/mcp`**, so an assistant can list workspaces, read and
+write the codebook, estimate and launch runs, and read back what was coded. Each
+user mints their own key from **Profile → Model access**; clients that cannot set
+headers can put it in the path instead (`/mcp/k/<key>/`).
+
+**A key is an identity, not a capability.** It reaches exactly the workspaces its
+owner is a member of — the same `workspace_for()` the web app uses — and it
+carries no Anthropic credential of its own, so a run started from a chat spends
+the owner's key and nobody else's. Revoking a key, or deactivating the person,
+closes the surface with it.
+
+**`PUBLIC_URL` is not optional behind a proxy.** The transport checks the Host
+header against DNS rebinding, and refuses every name it was not told about; the
+symptom is a tool that looks broken and is a missing variable.
+
+**Keep `/mcp` outside any gate.** A model client has no browser and no cookie, so
+putting it behind a domain session is a way of switching it off. `/mcp/*` covers
+the `/mcp/k/<key>` form too.
+
 ## Authentication: two modes
 
 AutoCode authenticates on its own by default and needs no identity provider.
@@ -120,10 +142,23 @@ docker exec -w /app autocode python map_borant.py --report
 docker exec -w /app autocode python map_borant.py --map you@example.org=01ABC...
 ```
 
-Public surface to keep outside any gate: `/healthz`, `/guide`, `/static/*` and
-**`/imgs/*`** — the second is a separate mount holding the logo and favicon
-that `login.html` itself loads, so gating it would serve a login page with no
-logo.
+Public surface to keep outside any gate: `/healthz`, `/guide`, `/static/*`,
+**`/imgs/*`** and **`/mcp` + `/mcp/*`** — the third is a separate mount holding
+the logo and favicon that `login.html` itself loads, so gating it would serve a
+login page with no logo, and the last has its own per-user key.
+
+```
+autocode.example.org {
+    @pubbliche path /healthz /guide /static/* /imgs/* /mcp /mcp/*
+    handle @pubbliche {
+        reverse_proxy 127.0.0.1:8007
+    }
+    handle {
+        import borantid
+        reverse_proxy 127.0.0.1:8007
+    }
+}
+```
 
 Rollback is two independent moves: `AUTH_MODE=local` plus
 `docker compose up -d`, and dropping the gate's block from the reverse proxy.

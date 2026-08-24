@@ -20,11 +20,12 @@ The result is cached on Run.analysis_json: a completed run is immutable, so the
 cache only needs invalidation when the stoplists change (the Recompute button).
 """
 import json
+import threading
 from collections import Counter
 from datetime import datetime
 
 import dictionary
-from models import Code, Coding, Run, RunSegment, Workspace
+from models import Code, Coding, Run, RunSegment, SessionLocal, Workspace
 from segmentation import SPACY_MODELS
 
 TOP_LEMMAS = 30
@@ -383,3 +384,64 @@ def get_analysis(run: Run, ws: Workspace, db, recompute: bool = False,
     run.analysis_json = json.dumps(result, ensure_ascii=False)
     db.commit()
     return result
+
+
+# ── Background compute ────────────────────────────────────────────────────────
+#
+# The lemma loop runs spaCy once per coded segment, which on a real corpus is
+# minutes, not milliseconds — too long for any request to sit on. It therefore
+# runs in a thread with a live progress dict, and the registry lives *here*
+# rather than in the web app because two surfaces now ask for it: the analysis
+# page and the MCP tool. One registry means the second caller joins the job the
+# first one started instead of paying to compute the same numbers twice.
+_jobs: dict[int, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _compute_bg(run_id: int, recompute: bool, progress: dict):
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        ws = (db.query(Workspace).filter(Workspace.id == run.workspace_id).first()
+              if run else None)
+        if not run or not ws:
+            progress["status"] = "error"
+            progress["error"] = "Run not found"
+            return
+        get_analysis(run, ws, db, recompute=recompute, progress=progress)
+        progress["status"] = "done"
+    except Exception as e:
+        progress["status"] = "error"
+        progress["error"] = str(e)
+    finally:
+        db.close()
+
+
+def start_compute(run: Run, recompute: bool = False) -> str:
+    """Kick off (or join) the analysis job for a run. Returns done | running."""
+    if not recompute and is_current(run):
+        return "done"
+    with _jobs_lock:
+        job = _jobs.get(run.id)
+        if job and job.get("status") == "running":
+            return "running"
+        progress = {"status": "running", "total": 0, "done": 0, "error": None}
+        _jobs[run.id] = progress
+    threading.Thread(target=_compute_bg, args=(run.id, bool(recompute), progress),
+                     daemon=True).start()
+    return "running"
+
+
+def compute_progress(run: Run) -> dict:
+    """Where the job is: idle (never asked), running, done, error."""
+    job = _jobs.get(run.id)
+    if not job:
+        return {"status": "done" if is_current(run) else "idle",
+                "total": 0, "done": 0, "error": None}
+    return {"status": job.get("status"), "total": job.get("total", 0),
+            "done": job.get("done", 0), "error": job.get("error")}
+
+
+def forget(run_id: int) -> None:
+    """Drop a deleted run's job entry, so the registry cannot outlive the run."""
+    _jobs.pop(run_id, None)

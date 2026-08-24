@@ -16,3 +16,4 @@ langdetect
 markdown
 matplotlib
 qrcode[pil]
+mcp>=2.0,<3

@@ -1,12 +1,16 @@
 """
 Autocode web app — FastAPI application.
 
-Phase 1: auth, workspaces + members, corpus upload, codebook CRUD + Excel import,
-segmentation preview, profile (API key), admin. Run engine arrives in phase 2.
+Two surfaces: the web app (session cookie, or the gate's headers in `gateway`)
+and **/mcp** for the model, gated by a per-user X-API-Key. The MCP key carries
+an identity and nothing else, so a model client reaches exactly the workspaces
+its owner reaches — and spends its owner's Anthropic credit, never anyone
+else's (see mcp_app.py).
 
 Patterns: JWT httpOnly cookie (AutoMap v2), bcrypt direct (vedetta),
 SQLAlchemy + SQLite, Jinja2 + vanilla JS.
 """
+import contextlib
 import io
 import json
 import os
@@ -14,6 +18,7 @@ import re
 import shutil
 import threading
 from datetime import datetime
+from urllib.parse import urlparse
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,26 +38,99 @@ import coding
 import conventions
 import dictionary
 import exports
+import runs as runs_mod
 import totp
 from auth import (
-    AUTH_MODE, BORANT_LOGOUT_URL, create_pending_token, create_token, gateway_mode,
-    get_current_user, get_pending_user, get_user_or_none, hash_password,
-    require_admin, verify_password,
+    AUTH_MODE, BORANT_LOGOUT_URL, check_api_key, create_pending_token, create_token,
+    gateway_mode, get_current_user, get_pending_user, get_user_or_none, hash_password,
+    require_admin, set_caller, verify_password,
 )
 from crypto import decrypt_api_key, encrypt_api_key, mask_api_key
-from models import (PRICING, Code, CodeExpression, Coding, Document, Run,
+from models import (PRICING, ApiKey, Code, CodeExpression, Coding, Document, Run,
                     RunDocument, RunSegment, SessionLocal, User, UserCostLog,
                     Workspace, WorkspaceMember, get_db, init_db, normalize_label,
-                    user_total_cost)
+                    owns_workspace, user_total_cost, workspace_for)
 from segmentation import SPACY_MODELS, inspect_excel, segment_text
 from translations import get_lang, get_t
 
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "data/uploads"))
 INPUT_TYPES = {"docx", "excel"}
-DOCX_SEG_MODES = {"document", "utterance_regex", "paragraph", "sentence"}
-EXCEL_SEG_MODES = {"cell", "sentence"}
+# The coding-unit vocabularies live in runs.py, with the rest of the launch
+# rules: /mcp starts runs too, and a second copy here would be a second answer.
+DOCX_SEG_MODES = runs_mod.DOCX_SEG_MODES
+EXCEL_SEG_MODES = runs_mod.EXCEL_SEG_MODES
 
-app = FastAPI(title="Autocode")
+from mcp_app import mcp  # noqa: E402
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(title="Autocode", lifespan=lifespan)
+
+
+# The MCP transport checks the Host header against DNS rebinding, so the public
+# domain has to be listed or every proxied request is refused — a failure that
+# looks like a broken tool and is a missing environment variable.
+def _allowed_hosts() -> list[str]:
+    hosts = ["localhost:8007", "127.0.0.1:8007", "localhost", "127.0.0.1"]
+    public = urlparse(os.environ.get("PUBLIC_URL", "")).netloc
+    if public:
+        hosts.append(public)
+    return hosts
+
+
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
+
+app.mount("/mcp", mcp.streamable_http_app(
+    streamable_http_path="/", json_response=True, stateless_http=True,
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=_allowed_hosts(),
+        allowed_origins=[os.environ.get("PUBLIC_URL", "http://localhost:8007")])))
+
+
+@app.middleware("http")
+async def mcp_key_gate(request: Request, call_next):
+    """
+    Resolve the MCP caller, or refuse.
+
+    Two ways in, one table. The header is the normal path; /mcp/k/{key} carries
+    the same key as a path segment for clients that cannot set headers, and is
+    stripped before the mounted app sees it, so the MCP layer stays unaware of
+    how the caller authenticated.
+
+    This surface never sees a session cookie and never sees the gate's headers:
+    a model client has no browser, and putting /mcp behind a domain session
+    would be a way of switching it off.
+    """
+    path = request.url.path
+    if not path.startswith("/mcp"):
+        return await call_next(request)
+
+    if path.startswith("/mcp/k/"):
+        key, _, rest = path[len("/mcp/k/"):].partition("/")
+        request.scope["path"] = "/mcp/" + rest
+        request.scope["raw_path"] = request.scope["path"].encode()
+    else:
+        key = request.headers.get("X-API-Key", "")
+
+    db = SessionLocal()
+    try:
+        row = check_api_key(db, key)
+        # `row.user` is read while the session is still open, which loads the
+        # User outright. Detached-but-loaded is exactly what the tools need:
+        # they open their own session and only ever touch plain columns on it.
+        set_caller(row.user if row else None)
+    finally:
+        db.close()
+    if not row:
+        return JSONResponse({"error": "missing or invalid API key"}, status_code=401)
+    return await call_next(request)
+
+
 @app.get("/healthz")
 def healthz():
     """Liveness, e sta fuori da qualunque gate.
@@ -98,20 +176,18 @@ def render(request: Request, name: str, user: User | None = None, **ctx):
 # ── Workspace access helpers ──────────────────────────────────────────────────
 
 def get_workspace_for(user: User, workspace_id: int, db: Session) -> Workspace:
-    """Workspace if the user is admin, owner or member; 404 otherwise."""
-    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    """Workspace if the user is admin, owner or member; 404 otherwise.
+
+    The rule itself lives in models.workspace_for, because /mcp asks the same
+    question and an access rule written twice is written once and holed once."""
+    ws = workspace_for(db, user, workspace_id)
     if not ws:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    if user.is_admin or ws.owner_id == user.id:
-        return ws
-    member = db.query(WorkspaceMember).filter_by(workspace_id=ws.id, user_id=user.id).first()
-    if not member:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return ws
 
 
 def require_owner(user: User, ws: Workspace):
-    if not (user.is_admin or ws.owner_id == user.id):
+    if not owns_workspace(user, ws):
         raise HTTPException(status_code=403, detail="Owner or admin required")
 
 
@@ -523,8 +599,12 @@ def page_profile(request: Request, db: Session = Depends(get_db)):
         masked = mask_api_key(decrypt_api_key(user.api_key_encrypted))
     cost_rows = (db.query(UserCostLog).filter(UserCostLog.user_id == user.id)
                  .order_by(UserCostLog.recorded_at.desc()).limit(20).all())
+    keys = (db.query(ApiKey).filter(ApiKey.user_id == user.id)
+            .order_by(ApiKey.created_at.desc()).all())
     return render(request, "profile.html", user, masked_key=masked,
-                  total_cost=user_total_cost(db, user.id), cost_rows=cost_rows)
+                  total_cost=user_total_cost(db, user.id), cost_rows=cost_rows,
+                  mcp_keys=keys,
+                  public_url=os.environ.get("PUBLIC_URL", "http://localhost:8007"))
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -1203,8 +1283,8 @@ class CodeIn(BaseModel):
     expressions: dict[str, list[str]] | None = None  # import only
 
 
-def _active_codes(ws: Workspace, db: Session) -> list[Code]:
-    return db.query(Code).filter(Code.workspace_id == ws.id, Code.is_deleted == False).all()
+_active_codes = runs_mod.active_codes
+_has_expressions = runs_mod.has_expressions
 
 
 def _clusters_in(ws: Workspace, db: Session) -> list[str]:
@@ -1217,13 +1297,6 @@ def _cluster_sort_key(code: Code) -> tuple:
     """Group by cluster, uncategorised last, alphabetical within the group."""
     cluster = (code.cluster or "").strip()
     return (1 if not cluster else 0, cluster.lower(), code.label.lower())
-
-
-def _has_expressions(ws: Workspace, db: Session) -> bool:
-    """Whether the active codebook carries any dictionary expression at all."""
-    return bool(db.query(CodeExpression.id)
-                .join(Code, Code.id == CodeExpression.code_id)
-                .filter(Code.workspace_id == ws.id, Code.is_deleted == False).first())
 
 
 @app.post("/api/workspaces/{workspace_id}/codes")
@@ -1473,67 +1546,19 @@ class RunIn(BaseModel):
     excluded_roles: list[str] = []  # per-run choice: code everything vs exclude e.g. interviewer
 
 
-def _resolve_run_unit(data: RunIn, ws: Workspace) -> str:
-    unit = data.unit or ws.segmentation_mode
-    allowed = EXCEL_SEG_MODES if ws.input_type == "excel" else DOCX_SEG_MODES
-    if unit not in allowed:
-        raise HTTPException(status_code=400,
-                            detail=f"Invalid coding unit for this corpus (allowed: {', '.join(sorted(allowed))})")
-    return unit
-
-
-def _validate_run_params(data: RunIn, ws: Workspace, db: Session) -> list[Document]:
-    if data.engine not in ("llm", "dictionary"):
-        raise HTTPException(status_code=400, detail="Invalid engine")
-    bad = [r for r in data.excluded_roles if r not in conventions.ROLES]
-    if bad:
-        raise HTTPException(status_code=400, detail=f"Unknown roles: {', '.join(bad)}")
-    if data.model not in PRICING:
-        raise HTTPException(status_code=400, detail="Unknown model")
-    if not (0 <= data.context_window <= 20):
-        raise HTTPException(status_code=400, detail="Context window must be 0–20")
-    if not (1 <= data.max_workers <= 10):
-        raise HTTPException(status_code=400, detail="Max workers must be 1–10")
-    docs = (db.query(Document)
-            .filter(Document.workspace_id == ws.id, Document.id.in_(data.document_ids))
-            .all())
-    if not docs:
-        raise HTTPException(status_code=400, detail="Select at least one document")
-    return docs
+def _spec(data) -> runs_mod.RunSpec:
+    return runs_mod.RunSpec(**data.model_dump())
 
 
 @app.post("/api/workspaces/{workspace_id}/runs")
 def api_create_run(workspace_id: int, data: RunIn,
                    user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Thin: every launch rule lives in runs.py, because /mcp launches too."""
     ws = get_workspace_for(user, workspace_id, db)
-    if data.engine == "llm":  # the dictionary engine needs neither a key nor a study context
-        if not user.api_key_encrypted:
-            raise HTTPException(status_code=400, detail="Save your Anthropic API key in the profile first")
-        if not (ws.study_context or "").strip():
-            raise HTTPException(status_code=400,
-                                detail="Set the study context in the workspace settings before starting a run")
-        # an empty codebook is allowed for the LLM (pure inductive coding); the UI
-        # just warns. The dictionary engine, by contrast, can match nothing without
-        # expressions — hard block, like the study-context constraint.
-    elif data.engine == "dictionary" and not _has_expressions(ws, db):
-        raise HTTPException(status_code=400,
-                            detail="The dictionary engine needs codes with expressions — your codebook has none. "
-                                   "Add expressions in the codebook, or use the LLM engine.")
-    # the coding unit is chosen on the run form, snapshotted on the run at launch
-    unit = _resolve_run_unit(data, ws)
-    if ws.input_type == "excel" or unit == "document" or data.engine == "dictionary":
-        data.context_window = 0  # no sequential context for respondents, whole docs or matching
-    docs = _validate_run_params(data, ws, db)
-    run = Run(workspace_id=ws.id, created_by_id=user.id, status="pending",
-              granularity=unit, engine=data.engine, model=data.model,
-              context_window=data.context_window, max_workers=data.max_workers,
-              excluded_roles_snapshot=json.dumps(sorted(set(data.excluded_roles))))
-    db.add(run)
-    db.flush()
-    for doc in docs:
-        db.add(RunDocument(run_id=run.id, document_id=doc.id, status="pending"))
-    db.commit()
-    threading.Thread(target=coding.execute_run, args=(run.id,), daemon=True).start()
+    try:
+        run = runs_mod.launch(_spec(data), ws, user, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "id": run.id}
 
 
@@ -1585,17 +1610,13 @@ def api_retry_failed(run_id: int, user: User = Depends(get_current_user),
     ws = get_workspace_for(user, run.workspace_id, db)
     if run.status == "running":
         raise HTTPException(status_code=400, detail="Run is still in progress")
-    if run.engine == "llm" and not (ws.study_context or "").strip():
-        raise HTTPException(status_code=400,
-                            detail="Set the study context in the workspace settings before starting a run")
-    if run.engine == "dictionary" and not _has_expressions(ws, db):
-        raise HTTPException(status_code=400,
-                            detail="The dictionary engine needs codes with expressions — your codebook has none.")
+    try:
+        runs_mod.preflight(run.engine, ws, user, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     failed = [rd for rd in run.run_documents if rd.status == "failed"]
     if not failed:
         raise HTTPException(status_code=400, detail="No failed documents to retry")
-    if run.engine == "llm" and not user.api_key_encrypted:
-        raise HTTPException(status_code=400, detail="Save your Anthropic API key in the profile first")
     for rd in failed:
         rd.status = "pending"
     run.status = "pending"
@@ -1619,7 +1640,7 @@ def api_delete_run(run_id: int, user: User = Depends(get_current_user),
     # the back-reference so it does not dangle to a deleted run
     db.query(Code).filter(Code.proposed_in_run_id == run.id).update(
         {"proposed_in_run_id": None}, synchronize_session=False)
-    _analysis_jobs.pop(run.id, None)
+    analysis_mod.forget(run.id)
     db.delete(run)  # cascades: run_documents, codings, segments, cost_logs
     db.commit()
     return {"ok": True}
@@ -1704,44 +1725,17 @@ def api_analysis_export(run_id: int, user: User = Depends(get_current_user),
         headers={"Content-Disposition": f'attachment; filename="autocode_run{run.id}_analysis.xlsx"'})
 
 
-# ── Async analysis compute (heavy: the lemma loop runs spaCy per coded segment) ──
-_analysis_jobs: dict[int, dict] = {}
-_analysis_lock = threading.Lock()
-
-
-def _compute_analysis_bg(run_id: int, recompute: bool, progress: dict):
-    db = SessionLocal()
-    try:
-        run = db.query(Run).filter(Run.id == run_id).first()
-        ws = db.query(Workspace).filter(Workspace.id == run.workspace_id).first() if run else None
-        if not run or not ws:
-            progress["status"] = "error"
-            progress["error"] = "Run not found"
-            return
-        analysis_mod.get_analysis(run, ws, db, recompute=recompute, progress=progress)
-        progress["status"] = "done"
-    except Exception as e:
-        progress["status"] = "error"
-        progress["error"] = str(e)
-    finally:
-        db.close()
+# ── Async analysis compute ────────────────────────────────────────────────────
+# Heavy (the lemma loop runs spaCy per coded segment), so it runs in a thread.
+# The job registry lives in analysis.py because /mcp asks for the same numbers:
+# a second caller joins the running job instead of recomputing them.
 
 
 @app.post("/api/runs/{run_id}/analysis/compute")
 def api_analysis_compute(run_id: int, recompute: int = 0,
                          user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     run = _completed_run_for(user, run_id, db)
-    if not recompute and analysis_mod.is_current(run):
-        return {"ok": True, "status": "done"}
-    with _analysis_lock:
-        job = _analysis_jobs.get(run_id)
-        if job and job.get("status") == "running":
-            return {"ok": True, "status": "running"}
-        progress = {"status": "running", "total": 0, "done": 0, "error": None}
-        _analysis_jobs[run_id] = progress
-    threading.Thread(target=_compute_analysis_bg,
-                     args=(run_id, bool(recompute), progress), daemon=True).start()
-    return {"ok": True, "status": "running"}
+    return {"ok": True, "status": analysis_mod.start_compute(run, bool(recompute))}
 
 
 @app.get("/api/runs/{run_id}/analysis/progress")
@@ -1751,12 +1745,7 @@ def api_analysis_progress(run_id: int, user: User = Depends(get_current_user),
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     get_workspace_for(user, run.workspace_id, db)
-    job = _analysis_jobs.get(run_id)
-    if not job:
-        return {"status": "done" if analysis_mod.is_current(run) else "idle",
-                "total": 0, "done": 0}
-    return {"status": job.get("status"), "total": job.get("total", 0),
-            "done": job.get("done", 0), "error": job.get("error")}
+    return analysis_mod.compute_progress(run)
 
 
 class EstimateIn(BaseModel):
@@ -1773,18 +1762,10 @@ class EstimateIn(BaseModel):
 def api_estimate_run(workspace_id: int, data: EstimateIn,
                      user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ws = get_workspace_for(user, workspace_id, db)
-    run_in = RunIn(**data.model_dump())
-    docs = _validate_run_params(run_in, ws, db)
-    unit = _resolve_run_unit(run_in, ws)
-    ctx = 0 if (ws.input_type == "excel" or unit == "document") else data.context_window
-    codes = (db.query(Code)
-             .filter(Code.workspace_id == ws.id, Code.is_deleted == False).all())
-    est = coding.estimate_run_cost(ws, docs, unit, ctx, data.model, codes,
-                                   excluded_roles=data.excluded_roles)
-    if data.engine == "dictionary":  # free and local: only the segment count is informative
-        est.update({"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0})
-    est["eta_seconds"] = coding.estimate_run_seconds(
-        data.engine, est["segments"], data.max_workers)
+    try:
+        est = runs_mod.estimate(_spec(data), ws, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, **est}
 
 
@@ -1811,6 +1792,41 @@ def api_save_key(data: ApiKeyIn, user: User = Depends(get_current_user),
 @app.delete("/api/profile/api-key")
 def api_remove_key(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     db.query(User).filter(User.id == user.id).update({"api_key_encrypted": None})
+    db.commit()
+    return {"ok": True}
+
+
+class McpKeyIn(BaseModel):
+    name: str | None = None
+
+
+@app.post("/api/profile/mcp-keys")
+def api_create_mcp_key(data: McpKeyIn, user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """
+    Mint an MCP key for yourself.
+
+    Keys belong to people, never to the deployment: a key reaches exactly the
+    workspaces its owner is a member of, and it carries no Anthropic credential
+    of its own — a run started through it spends the owner's key, the same one
+    the web app would have spent.
+    """
+    row = ApiKey(user_id=user.id, name=(data.name or "").strip() or "mcp")
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id, "name": row.name, "key": row.key}
+
+
+@app.delete("/api/profile/mcp-keys/{key_id}")
+def api_revoke_mcp_key(key_id: int, user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    """Revoke, never delete: a key that stopped working should still be visible
+    as the key that stopped working."""
+    row = (db.query(ApiKey)
+           .filter(ApiKey.id == key_id, ApiKey.user_id == user.id).first())
+    if not row:
+        raise HTTPException(status_code=404, detail="Key not found")
+    row.active = False
     db.commit()
     return {"ok": True}
 

@@ -13,6 +13,7 @@ Migration strategy: init_db() runs ALTER TABLE for each new column on every star
 SQLite raises on duplicate columns; failures are caught and ignored (additive only).
 """
 import os
+import secrets
 from datetime import datetime
 
 from sqlalchemy import (
@@ -79,6 +80,32 @@ class Workspace(Base):
     documents = relationship("Document", back_populates="workspace", cascade="all, delete-orphan")
     codes     = relationship("Code", back_populates="workspace", cascade="all, delete-orphan")
     runs      = relationship("Run", back_populates="workspace", cascade="all, delete-orphan")
+
+
+class ApiKey(Base):
+    """
+    An MCP credential, and deliberately a credential *of a person*.
+
+    It carries an identity and nothing else. Every MCP call resolves to `user`
+    and then goes through the same workspace_for() the web app uses, so a key
+    can never reach a workspace its owner is not a member of. Without the user
+    binding the model surface would be a hole straight through the access model.
+
+    Note what it does NOT carry: the Anthropic key. That one stays per-user and
+    encrypted, so a run started from a chat spends its owner's budget and a key
+    handed to a client cannot spend anybody else's.
+    """
+    __tablename__ = "api_keys"
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(Integer, ForeignKey("users.id"), nullable=False)
+    name         = Column(String, nullable=False)
+    key          = Column(String, unique=True, nullable=False,
+                          default=lambda: "ac_" + secrets.token_urlsafe(32))
+    active       = Column(Boolean, default=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
 
 
 class WorkspaceMember(Base):
@@ -340,6 +367,30 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def workspace_for(db, user, workspace_id: int):
+    """
+    The workspace this user may see — admin, owner or plain member — or None.
+
+    One rule, two surfaces: `app.get_workspace_for` wraps this in a 404 and
+    `auth.mcp_workspace` in a LookupError, so the model reaches exactly what its
+    owner reaches. Written once because two implementations of one access rule
+    are one implementation and one hole.
+    """
+    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not ws:
+        return None
+    if user.is_admin or ws.owner_id == user.id:
+        return ws
+    member = (db.query(WorkspaceMember)
+              .filter_by(workspace_id=ws.id, user_id=user.id).first())
+    return ws if member else None
+
+
+def owns_workspace(user, ws) -> bool:
+    """Owner or global admin — the level that deletes, renames members, drops runs."""
+    return bool(user.is_admin or ws.owner_id == user.id)
 
 
 def user_total_cost(db, user_id: int) -> float:

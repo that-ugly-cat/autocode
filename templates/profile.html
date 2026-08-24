@@ -24,6 +24,42 @@
 </div>
 
 <div class="card">
+  <h2>{{ T.prof_mcp }}</h2>
+  <p class="muted">{{ T.prof_mcp_hint }}</p>
+  <p class="muted small">{{ T.prof_mcp_endpoint }}: <code>{{ public_url }}/mcp</code> — {{ T.prof_mcp_header }}
+     <code>{{ public_url }}/mcp/k/&lt;key&gt;</code></p>
+  {% if mcp_keys %}
+  <table class="table">
+    <thead><tr>
+      <th>{{ T.prof_mcp_name_col }}</th><th>{{ T.prof_mcp_key_col }}</th>
+      <th>{{ T.prof_mcp_created }}</th><th>{{ T.prof_mcp_used }}</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for k in mcp_keys %}
+      <tr>
+        <td>{{ k.name }}</td>
+        <td><code>{{ k.key if k.active else '— ' + T.prof_mcp_revoked + ' —' }}</code></td>
+        <td class="muted">{{ k.created_at.strftime('%Y-%m-%d') }}</td>
+        <td class="muted">{{ k.last_used_at.strftime('%Y-%m-%d %H:%M') if k.last_used_at else T.prof_mcp_never }}</td>
+        <td>{% if k.active %}
+          <button class="btn btn-small btn-danger" onclick="revokeKey({{ k.id }})">{{ T.prof_mcp_revoke }}</button>
+        {% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p><span class="badge badge-warn">{{ T.prof_mcp_none }}</span></p>
+  {% endif %}
+  <form onsubmit="return createMcpKey(event)" class="inline-form">
+    <input type="text" id="mcp-name" placeholder="{{ T.prof_mcp_name }}" autocomplete="off">
+    <button type="submit" class="btn btn-primary">{{ T.prof_mcp_create }}</button>
+  </form>
+  <p class="muted small">{{ T.prof_mcp_url_caveat }}</p>
+  <div id="mcp-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="card">
   <h2>{{ T.prof_2fa }}</h2>
   <p><span class="badge badge-ok">{{ T.prof_2fa_on }}</span></p>
   <p class="muted small">{{ T.prof_2fa_hint }}</p>
@@ -73,6 +109,20 @@ async function removeKey() {
   if (!confirm('{{ T.confirm_delete }}')) return;
   try { await api('DELETE', '/api/profile/api-key'); location.reload(); }
   catch (err) { flash(document.getElementById('key-flash'), err.message, true); }
+}
+async function createMcpKey(e) {
+  e.preventDefault();
+  try {
+    await api('POST', '/api/profile/mcp-keys',
+              { name: document.getElementById('mcp-name').value });
+    location.reload();
+  } catch (err) { flash(document.getElementById('mcp-flash'), err.message, true); }
+  return false;
+}
+async function revokeKey(id) {
+  if (!confirm('{{ T.confirm_delete }}')) return;
+  try { await api('DELETE', '/api/profile/mcp-keys/' + id); location.reload(); }
+  catch (err) { flash(document.getElementById('mcp-flash'), err.message, true); }
 }
 async function regenBackup(e) {
   e.preventDefault();

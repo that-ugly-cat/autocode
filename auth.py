@@ -1,6 +1,13 @@
 """
 Authentication for Autocode web app.
 
+Three ways in, and they are not interchangeable. A browser carries a session
+cookie (or, in `gateway`, an identity header the proxy put there); a model
+client carries a per-user API key on /mcp, because it has no browser and no
+cookie and a redirect to a login page is the one thing it cannot handle. What
+does not change between them is *authorization*: whoever you turn out to be,
+`workspace_for()` still decides what you may touch.
+
 Strategy: JWT stored in an httpOnly cookie named 'session' (pattern: AutoMap v2),
 password hashing with bcrypt directly (pattern: vedetta — no passlib).
 - Token lifetime: EXPIRE_DAYS days (renewed on each login, not on activity).
@@ -12,6 +19,7 @@ import ipaddress
 import logging
 import os
 import secrets
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 
 import bcrypt
@@ -19,7 +27,8 @@ from fastapi import Cookie, Depends, HTTPException, Request, status
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
-from models import User, get_db
+from models import (ApiKey, User, Workspace, get_db, owns_workspace,
+                    workspace_for)
 
 log = logging.getLogger("autocode.auth")
 
@@ -243,6 +252,79 @@ def get_pending_user(session: str | None, db: Session) -> User | None:
     except HTTPException:
         return None
     return db.query(User).filter(User.id == user_id, User.is_active == True).first()
+
+
+# ── MCP surface ───────────────────────────────────────────────────────────────
+#
+# The MCP tools are plain sync functions with no access to the request, so the
+# caller the middleware resolved is handed over in a contextvar. One caller per
+# request, and `stateless_http` means one request per call.
+_caller: ContextVar["User | None"] = ContextVar("mcp_caller", default=None)
+
+
+def check_api_key(db: Session, key: str) -> ApiKey | None:
+    """The active ApiKey row for this key, or None. Stamps last_used_at, so a
+    key still in use somewhere is visible from the profile page."""
+    if not key:
+        return None
+    row = (db.query(ApiKey)
+           .filter(ApiKey.key == key, ApiKey.active == True).first())  # noqa: E712
+    if row is None or not row.user or not row.user.is_active:
+        return None
+    row.last_used_at = datetime.utcnow()
+    db.commit()
+    return row
+
+
+def set_caller(user: User | None) -> None:
+    _caller.set(user)
+
+
+def current_caller() -> User:
+    user = _caller.get()
+    if user is None:
+        raise PermissionError("No authenticated caller")
+    return user
+
+
+def mcp_workspace(db: Session, workspace: str, owner: bool = False):
+    """
+    Resolve a workspace for an MCP call, under the caller's own permissions.
+
+    `workspace` is an id or a name: the model has no address bar to read an id
+    out of, and asking it to call list_workspaces before every single tool is a
+    round trip charged for nothing. An ambiguous name is refused with the
+    candidates, never guessed.
+
+    Same rule as the web app: no membership is indistinguishable from no
+    workspace. The model is told "not found", never "exists but forbidden", so
+    it cannot enumerate what it cannot see.
+    """
+    user = current_caller()
+    raw = (workspace or "").strip()
+    if not raw:
+        raise LookupError("A workspace id or name is required")
+    ws = None
+    if raw.isdigit():
+        ws = workspace_for(db, user, int(raw))
+    else:
+        needle = raw.lower()
+        rows = db.query(Workspace).all()
+        mine = [w for w in rows if workspace_for(db, user, w.id) is not None]
+        exact = [w for w in mine if w.name.strip().lower() == needle]
+        hits = exact or [w for w in mine if needle in w.name.lower()]
+        if len(hits) > 1:
+            raise LookupError(
+                f"'{workspace}' matches {len(hits)} workspaces: "
+                + ", ".join(f"{w.id} ({w.name})" for w in hits[:8])
+                + ". Pass the id.")
+        ws = hits[0] if hits else None
+    if ws is None:
+        raise LookupError(f"No workspace '{workspace}'")
+    if owner and not owns_workspace(user, ws):
+        raise PermissionError(
+            f"'{ws.name}' — this needs the workspace owner, you are a member")
+    return ws
 
 
 def require_admin(user: User = Depends(get_current_user)) -> User:

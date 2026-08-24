@@ -100,7 +100,21 @@ From a completed run:
 
 Charts, lemma frequencies, topic modeling: do them in a notebook from the Excel export — the `segments` sheet contains every text.
 
-## 8. Data protection
+## 8. Working from a chat (MCP)
+
+If you work with an AI assistant, AutoCode can be plugged straight into it. A codebook is usually *thought out* in a conversation and then typed into a form; this removes the second half.
+
+**Getting a key.** Open **Profile → Model access** and create one. Paste the endpoint (`https://your-autocode/mcp`) and the key into your client's MCP settings, as an `X-API-Key` header. Clients that cannot set headers can use `https://your-autocode/mcp/k/<your-key>/` instead — the key sits in the URL there, where access logs may keep it, so use a separate key per client and revoke rather than share.
+
+**What the assistant can do.** List your workspaces and read their settings; read and write the codebook (add a whole draft in one go, refine a description, retire a code, set dictionary expressions); estimate what a run would cost; start one; follow its progress; and read back the coded extracts *with the rationale the model gave for each* — which is the part worth having in a conversation, because it is where you decide whether a code means what you thought it meant.
+
+**What it cannot do.** Upload documents (files are binary — the corpus arrives through the web app), change segmentation settings, or delete a workspace.
+
+**What it reaches.** Exactly what you reach: your key is your identity, so a workspace you are not a member of does not exist as far as your assistant is concerned. Inviting people and rewriting the study context stay with the workspace owner.
+
+**What it spends.** Your Anthropic key, the same one the web app would spend, and only when you say to start a run. Ask for the estimate first — it is free, and a cost seen afterwards is not a decision.
+
+## 9. Data protection
 
 AutoCode processes whatever you upload — **it is up to you, the researcher, to make sure that what you upload is appropriate to process**. A few facts to base that judgement on:
 
@@ -108,9 +122,10 @@ AutoCode processes whatever you upload — **it is up to you, the researcher, to
 - The **dictionary engine runs entirely on the server** — nothing leaves the machine. For sensitive corpora it is the appropriate first choice.
 - **Pseudonymize before uploading**: replace names, places, dates and any identifying detail in transcripts and survey exports *before* they enter the corpus. Coding quality does not depend on real identities.
 - Uploaded documents are stored on the server for the lifetime of the workspace and are visible to all its members. Deleting a document (or the workspace) removes its files and codings.
+- **A model key is a second door onto the same corpus.** An assistant holding one can read your coded extracts, which means those extracts reach whichever model that client talks to. It is the same judgement as the LLM engine, made once for everything you can see rather than run by run — so make it deliberately, and revoke the key when the project ends.
 - Compliance with GDPR, your institutional requirements and the conditions of your ethics approval is the researcher's responsibility, not the tool's. When in doubt, ask your data protection officer — before uploading, not after.
 
-## 9. Good practices
+## 10. Good practices
 
 - **Description quality drives coding quality** (LLM engine): a one-line vague description yields vague coding. Write what a human coder would need.
 - **Pilot first**: run a small subset, review the extracts, refine codebook and study context, then launch the full corpus.

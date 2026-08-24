@@ -6,3 +6,6 @@ __pycache__/
 
 # ambiente di prova locale, mai nel repo
 .venv/
+
+# avvio locale di prova
+.devdata/
