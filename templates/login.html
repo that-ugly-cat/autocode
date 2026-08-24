@@ -153,7 +153,29 @@
     </div>
   </div>
 
-  <!-- Login / Register -->
+  <!-- Login / Register, oppure l'invito a entrare ─────────────────────────
+       La stessa pagina fa da vetrina pubblica e da pagina d'accesso: copy,
+       CSS e modali sono gli stessi, cambia solo questo pannello. `/` la rende
+       senza form e chiunque puo' leggerla; il pannello col form si vede solo
+       quando l'app autentica da se'.
+
+       Il bottone punta a `/app`, che e' **gated**, e non a un form: questa
+       pagina sta sul ramo pubblico, dove l'identita' viene tolta per
+       costruzione, quindi non sa chi la legge e non ci prova. Puntando a un
+       path gated funziona identica nei quattro casi — col gate o senza, gia'
+       dentro o no. -->
+  {% if not mostra_login %}
+  <div class="login-panel">
+    <div class="login-card">
+      <div class="card-title">{{ T.login_title }}</div>
+      <div class="card-sub">{{ T.login_sub }}</div>
+      <a href="/app" class="btn btn-primary"
+         style="display:block;text-align:center;text-decoration:none;margin-top:1.4rem;padding:.7rem">
+        {{ T.auth_tab_login }} →
+      </a>
+    </div>
+  </div>
+  {% else %}
   <div class="login-panel">
     <div class="login-card">
       <div class="card-title">{{ T.login_title }}</div>
@@ -181,6 +203,7 @@
       <div id="auth-flash" class="flash" style="display:none"></div>
     </div>
   </div>
+  {% endif %}
 
   <!-- Modals -->
   <div class="overlay" id="modal-llm">

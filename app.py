@@ -261,10 +261,34 @@ def api_logout():
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
+def page_landing(request: Request):
+    """La vetrina pubblica. Sta fuori dal gate e **non guarda mai chi sei**.
+
+    Prima questa rotta decideva: login.html se sloggato, la lista dei workspace
+    se dentro. Sul ramo pubblico quella decisione non si puo' prendere —
+    l'identita' viene tolta per costruzione — quindi sarebbe stata «sempre
+    sloggato» dietro il gate e «dipende» senza: la stessa pagina con due
+    comportamenti. Ora la vetrina e la lista sono due path diversi, e questo
+    non chiede niente a nessuno.
+    """
+    return render(request, "login.html", None, mostra_login=False)
+
+
+@app.get("/app", response_class=HTMLResponse)
 def page_home(request: Request, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return render(request, "login.html")
+        # In `gateway` non si serve il form: quel login l'app lo rifiuta gia'
+        # da se', quindi sarebbe un vicolo cieco che sembra vivo — lo si scopre
+        # dopo aver scritto la password. In produzione non ci si arriva mai da
+        # sloggati, perche' il gate intercetta prima; ma se il matcher del
+        # proxy fosse sbagliato meglio un errore che dice cosa controllare.
+        if gateway_mode():
+            raise HTTPException(status_code=503, detail=(
+                "Gateway mode: no valid identity in the X-Borant-* headers. Check "
+                "that the gate really sits in front of this app and that "
+                "BORANT_TRUSTED_PROXY lists the address the proxy connects from."))
+        return render(request, "login.html", None, mostra_login=True)
     owned = db.query(Workspace).filter(Workspace.owner_id == user.id).all()
     member_rows = (db.query(Workspace)
                    .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -280,20 +304,20 @@ def page_2fa(request: Request, db: Session = Depends(get_db)):
     # `two_factor` su `/`: questa pagina resterebbe un secondo TOTP in fila al
     # primo, che e' esattamente cio' che l'SSO esiste per togliere.
     if gateway_mode():
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     cookie = request.cookies.get("session")
     if get_user_or_none(cookie, db, request):  # already fully authenticated
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     user = get_pending_user(cookie, db)
     if not user:  # no pending session → back to login
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     return render(request, "twofa.html", None, enrolled=bool(user.totp_enabled), email=user.email)
 
 
 def _workspace_page(request: Request, workspace_id: int, template: str, db: Session, **extra):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     return render(request, template, user, ws=ws,
                   is_owner=(user.is_admin or ws.owner_id == user.id), **extra)
@@ -303,7 +327,7 @@ def _workspace_page(request: Request, workspace_id: int, template: str, db: Sess
 def page_workspace(request: Request, workspace_id: int, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     n_codes = db.query(Code).filter(Code.workspace_id == ws.id, Code.is_deleted == False).count()
     n_runs = db.query(Run).filter(Run.workspace_id == ws.id).count()
@@ -321,7 +345,7 @@ def page_workspace(request: Request, workspace_id: int, db: Session = Depends(ge
 def page_corpus(request: Request, workspace_id: int, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     convention_options = ([(name, p["label"]) for name, p in conventions.PRESETS.items()]
                           + [(n, n) for n in sorted(conventions.workspace_library(ws))])
@@ -335,7 +359,7 @@ def page_corpus(request: Request, workspace_id: int, db: Session = Depends(get_d
 def page_codebook(request: Request, workspace_id: int, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     codes = (db.query(Code)
              .filter(Code.workspace_id == ws.id, Code.is_deleted == False)
@@ -357,7 +381,7 @@ def page_code_extracts(request: Request, workspace_id: int, code_id: int,
                        run_id: int | None = None, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     code = db.query(Code).filter(Code.id == code_id, Code.workspace_id == ws.id).first()
     if not code:
@@ -382,7 +406,7 @@ def page_code_extracts(request: Request, workspace_id: int, code_id: int,
 def page_settings(request: Request, workspace_id: int, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     try:
         stoplists = json.loads(ws.stoplists_json or "{}")
@@ -398,7 +422,7 @@ def page_run_analysis(request: Request, workspace_id: int, run_id: int,
                       recompute: int = 0, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     run = db.query(Run).filter(Run.id == run_id, Run.workspace_id == ws.id).first()
     if not run:
@@ -431,7 +455,7 @@ def page_run_analysis(request: Request, workspace_id: int, run_id: int,
 def page_runs(request: Request, workspace_id: int, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     runs = (db.query(Run).filter(Run.workspace_id == ws.id)
             .order_by(Run.id.desc()).all())
@@ -462,7 +486,7 @@ def page_run_detail(request: Request, workspace_id: int, run_id: int,
                     db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     ws = get_workspace_for(user, workspace_id, db)
     run = db.query(Run).filter(Run.id == run_id, Run.workspace_id == ws.id).first()
     if not run:
@@ -493,7 +517,7 @@ def page_guide(request: Request):
 def page_profile(request: Request, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     masked = None
     if user.api_key_encrypted:
         masked = mask_api_key(decrypt_api_key(user.api_key_encrypted))
@@ -507,7 +531,7 @@ def page_profile(request: Request, db: Session = Depends(get_db)):
 def page_admin(request: Request, db: Session = Depends(get_db)):
     user = get_user_or_none(request.cookies.get("session"), db, request)
     if not user:
-        return RedirectResponse("/", status_code=302)
+        return RedirectResponse("/app", status_code=302)
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Admin required")
     users = db.query(User).order_by(User.created_at).all()

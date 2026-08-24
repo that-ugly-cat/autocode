@@ -116,7 +116,7 @@ async function removeMember(id) {
 async function deleteWs(e) {
   e.preventDefault();
   if (document.getElementById('confirm-name').value !== {{ ws.name|tojson }}) return false;
-  try { await api('DELETE', '/api/workspaces/{{ ws.id }}'); location.href = '/'; }
+  try { await api('DELETE', '/api/workspaces/{{ ws.id }}'); location.href = '/app'; }
   catch (err) { flash(document.getElementById('set-flash'), err.message, true); }
   return false;
 }

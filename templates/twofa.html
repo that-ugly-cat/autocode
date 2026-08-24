@@ -28,7 +28,7 @@
       <h3>{{ T.tfa_backup_title }}</h3>
       <p class="muted small">{{ T.tfa_backup_hint }}</p>
       <pre id="backup-codes" class="backup-codes"></pre>
-      <button class="btn btn-primary" onclick="location.href='/'">{{ T.tfa_backup_done }}</button>
+      <button class="btn btn-primary" onclick="location.href='/app'">{{ T.tfa_backup_done }}</button>
     </div>
   </div>
   <p class="muted small" style="text-align:center"><button class="btn-link" onclick="logout()">{{ T.logout_btn }}</button></p>
@@ -64,7 +64,7 @@ async function doVerify(e) {
   e.preventDefault();
   try {
     await api('POST', '/api/auth/2fa/verify', { code: document.getElementById('tfa-code').value });
-    location.href = '/';
+    location.href = '/app';
   } catch (err) { flash(document.getElementById('tfa-flash'), err.message, true); }
   return false;
 }

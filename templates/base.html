@@ -11,9 +11,9 @@
 <body>
 {% if user %}
 <header class="topbar">
-  <a class="brand" href="/"><img src="/imgs/logo.png" alt="{{ T.app_name }}" class="brand-logo"></a>
+  <a class="brand" href="/app"><img src="/imgs/logo.png" alt="{{ T.app_name }}" class="brand-logo"></a>
   <nav>
-    <a href="/" class="{% block nav_ws %}{% endblock %}">{{ T.nav_workspaces }}</a>
+    <a href="/app" class="{% block nav_ws %}{% endblock %}">{{ T.nav_workspaces }}</a>
     <a href="/profile" class="{% block nav_profile %}{% endblock %}">{{ T.nav_profile }}</a>
     {% if user.is_admin %}<a href="/admin" class="{% block nav_admin %}{% endblock %}">{{ T.nav_admin }}</a>{% endif %}
     <a href="/guide" target="_blank" rel="noopener">{{ T.guide_btn }}</a>
