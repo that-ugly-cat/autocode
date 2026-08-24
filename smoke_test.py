@@ -1428,6 +1428,15 @@ check("tools/list over http", r.status_code == 200 and "start_run" in tool_names
 r = rpc("tools/list", {}, path=f"/mcp/k/{mcp_key}/")
 check("the key travels in the path too", r.status_code == 200
       and "tools" in r.json().get("result", {}))
+# The endpoint the profile page advertises has no trailing slash, and the mount
+# answers 307 on it — which MCP clients do not follow on POST, and which behind
+# TLS termination points at http://. The middleware normalises it.
+r = rpc("tools/list", {}, key=mcp_key, path="/mcp")
+check("the endpoint works without the trailing slash", r.status_code == 200
+      and "tools" in r.json().get("result", {}), str(r.status_code))
+r = rpc("tools/list", {}, path=f"/mcp/k/{mcp_key}")
+check("and the path-key form works without it either", r.status_code == 200
+      and "tools" in r.json().get("result", {}), str(r.status_code))
 r, payload = rpc_call("list_workspaces", {})
 check("tools/call over http", r.status_code == 200 and payload["you"] == "Test Owner",
       str(payload)[:200])

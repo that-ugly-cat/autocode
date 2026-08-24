@@ -116,6 +116,14 @@ async def mcp_key_gate(request: Request, call_next):
         request.scope["raw_path"] = request.scope["path"].encode()
     else:
         key = request.headers.get("X-API-Key", "")
+        # The Starlette mount answers 307 on `/mcp` without the trailing slash,
+        # and MCP clients do not follow redirects on POST. Worse behind TLS
+        # termination: the app does not know it is on https, so the redirect it
+        # builds points at http://. Normalise here rather than publish an
+        # endpoint that only works with a slash nobody thinks to type.
+        if path == "/mcp":
+            request.scope["path"] = "/mcp/"
+            request.scope["raw_path"] = b"/mcp/"
 
     db = SessionLocal()
     try:
