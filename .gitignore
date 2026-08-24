@@ -3,3 +3,6 @@ data/
 .venv-test/
 __pycache__/
 *.pyc
+
+# ambiente di prova locale, mai nel repo
+.venv/
