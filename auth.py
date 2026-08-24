@@ -121,14 +121,33 @@ def user_from_gateway(request: Request, db: Session) -> User | None:
 
     # Una password locale che non conosce nessuno, invece di nessuna password:
     # AUTH_MODE=local deve restare una strada di ritorno.
+    # L'hint del gate puo' proporre `admin`, e da oggi viene onorato.
+    #
+    # Qui `is_admin` apre la gestione degli utenti — disattivare, resettare
+    # password e secondo fattore — e non le funzioni del prodotto, che sono
+    # aperte a chiunque abbia un grant. La deroga alla regola «mai provisionare
+    # privilegio da un header» regge sul solito presupposto: la registrazione
+    # aperta su Borant ID e' spenta, e anche una richiesta d'accesso fa
+    # scegliere il ruolo all'amministratore approvando, quindi `admin` in
+    # quell'header c'e' solo perche' un umano l'ha digitato.
+    #
+    # Un hint non conosciuto e' un refuso, non un ruolo, e non concede niente.
+    hint = (request.headers.get("x-borant-hint", "") or "").strip().lower()
+    fa_admin = hint == "admin"
+    if hint and not fa_admin:
+        log.warning("gateway: hint %r non e' un ruolo di questa app, ignorato", hint)
+    if fa_admin:
+        log.warning("gateway: %s (%s) creato come ADMIN su suggerimento del gate. "
+                    "Quel ruolo gestisce gli utenti di questa app. Revocare da "
+                    "/admin se non era voluto.", email, sub)
     user = User(email=email,
                 name=request.headers.get("x-borant-name", "").strip() or email,
                 hashed_password=hash_password(secrets.token_urlsafe(32)),
-                borant_sub=sub, is_active=True, is_admin=False)
+                borant_sub=sub, is_active=True, is_admin=fa_admin)
     db.add(user)
     db.commit()
     db.refresh(user)
-    log.info("gateway: new profile for %s (%s)", email, sub)
+    log.info("gateway: new profile for %s (%s), admin=%s", email, sub, fa_admin)
     return user
 
 
