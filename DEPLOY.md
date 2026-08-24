@@ -79,3 +79,51 @@ tar czf backup-uploads-$(date +%F).tar.gz data/uploads
 ```
 
 SQLite is a single file — copying it (plus the uploads folder) is enough.
+
+## Authentication: two modes
+
+AutoCode authenticates on its own by default and needs no identity provider.
+`AUTH_MODE=gateway` is a second mode, for a deployment behind an SSO gate that
+speaks the `X-Borant-*` header contract.
+
+```
+AUTH_MODE=local     (default)   email + password + TOTP, as always
+AUTH_MODE=gateway               the upstream gate vouches via X-Borant-Sub
+```
+
+**Read this before switching.** AutoCode's second factor is real: `POST
+/api/auth/login` grants a ten-minute pending token and nothing else until TOTP
+is passed. In `gateway` the local login is off, and the local second factor
+goes with it — so the gate has to carry a `two_factor` policy or the migration
+is a weakening rather than a move. The policy belongs on `/`, not on `/admin`:
+a level goes on a class of secrets, and the per-user Anthropic keys are set
+from `/profile`.
+
+What else changes in `gateway`: local registration is closed (two parallel
+identities otherwise), `/2fa` redirects, and logout returns a `redirect` in its
+JSON so the browser goes on to the gate — dropping the local cookie alone is
+not signing out while the gate still holds the session.
+
+`BORANT_TRUSTED_PROXY` is measured, not deduced. Under Docker it is a bridge
+gateway and **not** `127.0.0.1`:
+
+```
+docker compose logs --tail 20 autocode
+# INFO:  172.x.0.1:54321 - "GET / HTTP/1.1" 200 OK
+```
+
+Linking existing accounts to gate subjects is a one-off manual step, before the
+mode is flipped:
+
+```
+docker exec -w /app autocode python map_borant.py --report
+docker exec -w /app autocode python map_borant.py --map you@example.org=01ABC...
+```
+
+Public surface to keep outside any gate: `/healthz`, `/guide`, `/static/*` and
+**`/imgs/*`** — the second is a separate mount holding the logo and favicon
+that `login.html` itself loads, so gating it would serve a login page with no
+logo.
+
+Rollback is two independent moves: `AUTH_MODE=local` plus
+`docker compose up -d`, and dropping the gate's block from the reverse proxy.
