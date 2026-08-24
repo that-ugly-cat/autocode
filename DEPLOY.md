@@ -127,3 +127,34 @@ logo.
 
 Rollback is two independent moves: `AUTH_MODE=local` plus
 `docker compose up -d`, and dropping the gate's block from the reverse proxy.
+
+## The landing, the home, and the role hint
+
+Same shape in every app of the perimeter, so there is nothing to remember per
+tool.
+
+**`/` is a public showcase and never asks who is reading it.** Not laziness: on
+the public branch of the reverse proxy the `X-Borant-*` headers are stripped by
+construction, so a branch on the user is always false behind the gate and
+sometimes true without one — the same page with two behaviours. By not asking,
+the page is identical in both modes and one button covers all four cases:
+gated or standalone, already signed in or not. It also shows no internal
+counts: anyone can read it.
+
+**The app lives at `/app`**, which is gated, and the showcase's button
+points there — not at `/login`, which on a page that can never recognise anyone
+would close a loop with no way in, and not at the gate's own URL, which would
+work and would wire Borant ID into an app that must keep running without it.
+
+**The role hint is honoured, and its vocabulary is one word: `admin`.** That
+flag opens user management — deactivate, reset password and second factor — and
+not the product, which anyone holding a grant already has. A profile created as
+an admin this way is logged loudly. An unrecognised hint grants nothing.
+
+**A page that needs an identity fails closed.** In `gateway` an unauthenticated
+request does *not* redirect to `/login` — the app switches that route off in
+this mode and sends it back, so the two would bounce forever. Production never
+shows it because the gate intercepts first, but a wrong proxy matcher would
+produce a spin instead of an error, and a loop is far harder to diagnose than a
+status code. The answer is a 503 naming what the operator should check, because
+a request arriving with no identity means the gate did not run.
