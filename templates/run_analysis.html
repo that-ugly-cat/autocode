@@ -166,7 +166,7 @@ function updateDrill(name) {
   const q = (code ? '&code=' + encodeURIComponent(code) : '')
           + (group ? '&group=' + encodeURIComponent(group) : '');
   const base = '/api/runs/{{ run.id }}/analysis/chart/' + name;
-  document.getElementById('img-' + name).src = base + '?fmt=png&theme=dark' + q;
+  document.getElementById('img-' + name).src = base + '?fmt=png&theme=' + (window.chartTheme ? window.chartTheme() : 'dark') + q;
   document.getElementById('png-' + name).href = base + '?fmt=png&theme=light&download=1' + q;
   document.getElementById('pdf-' + name).href = base + '?fmt=pdf&theme=light&download=1' + q;
 }
