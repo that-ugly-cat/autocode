@@ -5,7 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{ T.login_page_title }}</title>
   <link rel="icon" type="image/png" href="/imgs/favicon.png">
-  <link rel="stylesheet" href="/static/css/style.css?v=14">
+  <link rel="stylesheet" href="/static/css/style.css?v=16">
+  <script>
+    // Questa pagina non estende base.html, quindi lo snippet va ripetuto qui:
+    // senza, chi ha scelto il chiaro arriva al login e lo trova scuro.
+    // Nessun bottone, perche' non c'e' topbar dove metterlo: la scelta si fa
+    // dentro, e questa pagina si limita a rispettarla.
+    (function () {
+      try {
+        if (window.localStorage.getItem("autocode-theme") === "light") {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      } catch (e) {}
+    })();
+  </script>
   <style>
     body { min-height: 100vh; display: flex; }
 
