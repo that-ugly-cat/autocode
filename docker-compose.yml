@@ -18,3 +18,15 @@ services:
       - OPENBLAS_NUM_THREADS=1
     volumes:
       - ./data:/app/data
+
+# Subnet fissata il 19 set 2026. I gateway delle reti Docker finiscono in
+# BORANT_TRUSTED_PROXY, e senza un pin dipendono dall'ordine di creazione:
+# bastava una risalita in ordine diverso perche' quindici app iniziassero a
+# rifiutare le identita' del gate con un 503 che sembra un guasto di auth.
+# Le app con repo stanno da 10.200.101.0/24 in su; quelle senza restano non
+# fissate nella parte bassa del pool, cosi' non possono rubare uno slot.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.200.102.0/24
