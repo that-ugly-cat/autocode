@@ -332,9 +332,11 @@ _FAKE_RESPONSES = [
 _call_count = {"n": 0}
 
 _seen_prompts = []
+_seen_schemas = []
 
-def _fake_call(client, system_prompt, text, context_utts=None, model="x", max_retries=5):
+def _fake_call(client, system_prompt, text, context_utts=None, model="x", max_retries=5, schema=None):
     _seen_prompts.append(system_prompt)
+    _seen_schemas.append(schema)
     resp = _FAKE_RESPONSES[_call_count["n"] % len(_FAKE_RESPONSES)]
     _call_count["n"] += 1
     return coding.CallResult(resp, 100, 20, 0.0005)
@@ -380,8 +382,30 @@ check("sonnet 4.6: no structured output, no effort",
       "output_config" not in _sent and _sent["max_tokens"] == 4096, str(_sent.get("output_config")))
 coding.call_claude(_client_answering(_ok_reply), "sys", "t", model="claude-opus-4-8")
 check("opus 4.8: reply constrained to the codings schema",
-      _sent.get("output_config", {}).get("format", {}).get("schema") == coding.CODINGS_SCHEMA
+      _sent.get("output_config", {}).get("format", {}).get("schema") == coding.build_codings_schema([])
       and "effort" not in _sent["output_config"], str(_sent.get("output_config"))[:200])
+
+# labels: a use_existing entry may only name a code the codebook has
+def _unions(node):
+    if isinstance(node, dict):
+        own = 1 if ("anyOf" in node or isinstance(node.get("type"), list)) else 0
+        return own + sum(_unions(v) for v in node.values())
+    if isinstance(node, list):
+        return sum(_unions(v) for v in node)
+    return 0
+_sch = coding.build_codings_schema(["autonomy", "Trust in self", "autonomy"])
+_branches = _sch["properties"]["codings"]["items"]["anyOf"]
+check("use_existing labels limited to the codebook",
+      _branches[0]["properties"]["code"]["enum"] == ["Trust in self", "autonomy"]
+      and _branches[0]["properties"]["action"]["enum"] == ["use_existing"]
+      and _branches[1]["properties"]["code"] == {"type": "string"}, str(_branches)[:300])
+check("schema stays under the API's 16 union parameters",
+      _unions(coding.build_codings_schema([f"code {i}" for i in range(300)])) <= 16)
+check("empty codebook: no use_existing branch",
+      "anyOf" not in coding.build_codings_schema([])["properties"]["codings"]["items"])
+coding.call_claude(_client_answering(_ok_reply), "sys", "t", model="claude-opus-4-8", schema=_sch)
+check("the document's schema is the one sent",
+      _sent["output_config"]["format"]["schema"] == _sch)
 for _m in ("claude-sonnet-5", "claude-opus-5-5"):
     _r = coding.call_claude(_client_answering(
         [_NS(type="thinking", thinking=""), *_ok_reply]), "sys", "t", model=_m)
@@ -510,6 +534,10 @@ if docx_path.exists():
     check("run keeps the prompt it sent", len(_prompts) == 1
           and _rd.system_prompt_sha in _prompts
           and coding.DEFAULT_CODING_RULES in _prompts[_rd.system_prompt_sha], str(_prompts)[:200])
+    check("a run sends the codebook's labels as the use_existing enum",
+          _seen_schemas and _seen_schemas[0]
+          and "autonomy" in _seen_schemas[0]["properties"]["codings"]["items"]["anyOf"][0]
+                                          ["properties"]["code"]["enum"], str(_seen_schemas[:1])[:200])
     check("run keeps how the model was called",
           _cfg.get("model") == "claude-sonnet-4-6" and _cfg.get("max_tokens") == 4096, str(_cfg))
 
@@ -533,7 +561,7 @@ if docx_path.exists():
     _FAKE_RESPONSES.append(None)  # one unit comes back uncodable, with a cause
     _orig_fake = coding.call_claude_with_retry
 
-    def _fake_with_error(client_, system_prompt, text, context_utts=None, model="x", max_retries=5):
+    def _fake_with_error(client_, system_prompt, text, context_utts=None, model="x", max_retries=5, schema=None):
         res = _orig_fake(client_, system_prompt, text, context_utts, model)
         return (res if res.entries is not None
                 else coding.CallResult(None, 100, 20, 0.0005, coding.error_reason("truncated", "max_tokens=4096")))

@@ -60,7 +60,7 @@ Codebook:
 
 Reply with a JSON object {{"codings": [...]}}. Each element of "codings" has five fields:
   "action": "use_existing", "create_new" or "no_code"
-  "code": the code label ("" for no_code)
+  "code": the code label, written exactly as in the codebook for use_existing ("" for no_code)
   "description": a short definition, for create_new only ("" otherwise)
   "example": the excerpt that motivates it, for create_new only ("" otherwise)
   "rationale": why
@@ -68,29 +68,38 @@ Use "no_code" with a rationale when the excerpt carries nothing relevant to the 
 Return {{"codings": []}} only if the text is completely uninformative."""
 
 # The reply schema for models that support structured outputs. Every field is required
-# and unused ones are empty strings: the flat shape keeps the schema free of unions.
-CODINGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "codings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["use_existing", "create_new", "no_code"]},
-                    "code": {"type": "string"},
-                    "description": {"type": "string"},
-                    "example": {"type": "string"},
-                    "rationale": {"type": "string"},
-                },
-                "required": ["action", "code", "description", "example", "rationale"],
-                "additionalProperties": False,
-            },
+# and unused ones are empty strings, so no field needs a nullable type.
+def _coding_item(actions: list[str], code: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": actions},
+            "code": code,
+            "description": {"type": "string"},
+            "example": {"type": "string"},
+            "rationale": {"type": "string"},
         },
-    },
-    "required": ["codings"],
-    "additionalProperties": False,
-}
+        "required": ["action", "code", "description", "example", "rationale"],
+        "additionalProperties": False,
+    }
+
+
+def build_codings_schema(labels: list[str]) -> dict:
+    """The schema for one document's codebook. A use_existing entry must name a code
+    exactly as the codebook spells it: a model that half-remembers a label ("Non-invasive
+    prenatal testing/ NIPT - ..." for "Prenatal testing/ NIPT - ...") would otherwise
+    turn it into a proposed code with no description. Proposals and no_code keep a free
+    label. One anyOf, so one union parameter: the API refuses a schema above 16."""
+    free = _coding_item(["create_new", "no_code"], {"type": "string"})
+    labels = sorted(set(labels))
+    item = ({"anyOf": [_coding_item(["use_existing"], {"type": "string", "enum": labels}), free]}
+            if labels else free)
+    return {
+        "type": "object",
+        "properties": {"codings": {"type": "array", "items": item}},
+        "required": ["codings"],
+        "additionalProperties": False,
+    }
 
 EST_OUTPUT_TOKENS_PER_SEGMENT = 150   # rough average for the JSON response
 # thinking at effort "low", billed as output: a guess until a real run measures it
@@ -210,7 +219,7 @@ def request_config(model: str) -> dict:
 
 
 def call_claude(client, system_prompt, text, context_utts=None,
-                model="claude-sonnet-4-6") -> CallResult:
+                model="claude-sonnet-4-6", schema: dict | None = None) -> CallResult:
     """One unit, one call. Prompt caching on system.
 
     `tokens_in` counts every input token, cached or not, so the run's token totals keep
@@ -229,7 +238,8 @@ def call_claude(client, system_prompt, text, context_utts=None,
 
     output_config = {}
     if profile["structured"]:
-        output_config["format"] = {"type": "json_schema", "schema": CODINGS_SCHEMA}
+        output_config["format"] = {"type": "json_schema",
+                                   "schema": schema or build_codings_schema([])}
     if profile["effort"]:
         output_config["effort"] = profile["effort"]
     kwargs = {"output_config": output_config} if output_config else {}
@@ -270,12 +280,13 @@ def call_claude(client, system_prompt, text, context_utts=None,
 
 
 def call_claude_with_retry(client, system_prompt, text, context_utts=None,
-                           model="claude-sonnet-4-6", max_retries=5) -> CallResult:
+                           model="claude-sonnet-4-6", max_retries=5,
+                           schema: dict | None = None) -> CallResult:
     """Exponential backoff on rate limits. Any other failure becomes a CallResult with
     the reason, so the unit shows why it was not coded."""
     for attempt in range(max_retries):
         try:
-            return call_claude(client, system_prompt, text, context_utts, model)
+            return call_claude(client, system_prompt, text, context_utts, model, schema)
         except anthropic.RateLimitError as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
@@ -512,13 +523,16 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
         # A cache entry becomes readable only once the first response has started, so
         # calls fired together all miss and each pays a full write. The first unit
         # goes alone; the rest then read the prompt it cached.
+        # built from the same codebook as the prompt, so the two cannot disagree
+        schema = build_codings_schema([c.label for c in codes])
         if jobs:
             pos, u, ctx = jobs[0]
-            record(pos, call_claude_with_retry(client, system_prompt, u["text"], ctx, run.model))
+            record(pos, call_claude_with_retry(client, system_prompt, u["text"], ctx, run.model,
+                                               schema=schema))
         with ThreadPoolExecutor(max_workers=run.max_workers) as executor:
             future_to_pos = {
                 executor.submit(call_claude_with_retry, client, system_prompt,
-                                u["text"], ctx, run.model): pos
+                                u["text"], ctx, run.model, schema=schema): pos
                 for pos, u, ctx in jobs[1:]
             }
             for future in as_completed(future_to_pos):
