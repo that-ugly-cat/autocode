@@ -289,17 +289,32 @@ class Coding(Base):
 
 # ── Cost tracking ─────────────────────────────────────────────────────────────
 
-# Pricing per million tokens (input, output) — update when Anthropic changes rates
-PRICING: dict[str, tuple[float, float]] = {
-    "claude-sonnet-4-6": (3.0,  15.0),
-    "claude-opus-4-8":   (15.0, 75.0),
-    "claude-haiku-4-5":  (0.8,   4.0),
+# Pricing per million tokens (input, output, cache read) — update when Anthropic
+# changes rates. Cache reads are priced per model rather than as a fixed fraction of
+# input: on newer models the ratio is not the usual 10%.
+#
+# A model enters this table only once the engine can call it as-is: the newer models
+# think by default, and with the engine's max_tokens=1024 that thinking would eat the
+# budget and truncate the JSON reply without raising.
+PRICING: dict[str, tuple[float, float, float]] = {
+    "claude-sonnet-4-6": (3.0, 15.0, 0.30),
+    "claude-opus-4-8":   (5.0, 25.0, 0.50),
+    "claude-haiku-4-5":  (1.0,  5.0, 0.10),
 }
 
+# A 5-minute cache write costs 1.25x the input rate.
+CACHE_WRITE_MULTIPLIER = 1.25
 
-def calc_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    p = PRICING.get(model, PRICING["claude-sonnet-4-6"])
-    return (tokens_in * p[0] + tokens_out * p[1]) / 1_000_000
+
+def calc_cost(model: str, tokens_in: int, tokens_out: int,
+              cache_write_tokens: int = 0, cache_read_tokens: int = 0) -> float:
+    """`tokens_in` is the uncached input only; cached input goes in the two cache
+    arguments, each at its own rate."""
+    p_in, p_out, p_read = PRICING.get(model, PRICING["claude-sonnet-4-6"])
+    return (tokens_in * p_in
+            + cache_write_tokens * p_in * CACHE_WRITE_MULTIPLIER
+            + cache_read_tokens * p_read
+            + tokens_out * p_out) / 1_000_000
 
 
 class UserCostLog(Base):

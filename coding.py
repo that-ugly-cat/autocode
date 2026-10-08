@@ -114,7 +114,13 @@ def parse_json_response(content: str):
 
 def call_claude(client, system_prompt, text, context_utts=None,
                 model="claude-sonnet-4-6", max_tokens=1024):
-    """Returns (parsed_response_or_None, tokens_in, tokens_out). Prompt caching on system."""
+    """Returns (parsed_response_or_None, tokens_in, tokens_out, cost_usd). Prompt caching
+    on system.
+
+    `tokens_in` counts every input token, cached or not, so the run's token totals keep
+    their meaning. The cost cannot be derived from that total: cache writes and reads
+    are billed at different rates, so it is priced here, per call, from the breakdown
+    the API returns — the only place where that breakdown exists."""
     if context_utts:
         user_content = (
             f"[CONTEXT — surrounding utterances, do not code]\n"
@@ -131,10 +137,12 @@ def call_claude(client, system_prompt, text, context_utts=None,
         messages=[{"role": "user", "content": user_content}],
     )
     usage = response.usage
-    tokens_in = (usage.input_tokens
-                 + getattr(usage, "cache_creation_input_tokens", 0)
-                 + getattr(usage, "cache_read_input_tokens", 0))
-    return parse_json_response(response.content[0].text), tokens_in, usage.output_tokens
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    tokens_in = usage.input_tokens + cache_write + cache_read
+    cost = calc_cost(model, usage.input_tokens, usage.output_tokens,
+                     cache_write_tokens=cache_write, cache_read_tokens=cache_read)
+    return parse_json_response(response.content[0].text), tokens_in, usage.output_tokens, cost
 
 
 def call_claude_with_retry(client, system_prompt, text, context_utts=None,
@@ -147,10 +155,10 @@ def call_claude_with_retry(client, system_prompt, text, context_utts=None,
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                return None, 0, 0
+                return None, 0, 0, 0.0
         except Exception:
-            return None, 0, 0
-    return None, 0, 0
+            return None, 0, 0, 0.0
+    return None, 0, 0, 0.0
 
 
 # ── Offsets (per_utterance QDPX anchoring) ────────────────────────────────────
@@ -312,8 +320,8 @@ def _resolve_code(db, run: Run, label: str, description: str | None,
 
 
 def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
-                      dict_index: dict | None = None) -> tuple[int, int]:
-    """Code one document. Returns (tokens_in, tokens_out). Raises on hard failure."""
+                      dict_index: dict | None = None) -> tuple[int, int, float]:
+    """Code one document. Returns (tokens_in, tokens_out, cost_usd). Raises on hard failure."""
     # layer 2: rebuild prompt from the codebook as it is *now* (document boundary reload)
     codes = _active_codes(db, ws.id)
     label_map = {normalize_label(c.label): c for c in codes}
@@ -336,6 +344,7 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
     jobs = [(i, u, contexts[i]) for i, u in enumerate(units) if not u["excluded"]]
     responses = [None] * len(units)
     tokens_in = tokens_out = 0
+    cost = 0.0
 
     if run.engine == "dictionary":
         language = doc.language or ws.segmentation_language
@@ -359,18 +368,29 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
     else:
         study_context = ws.study_context or ws.description or ws.name
         system_prompt = build_system_prompt(study_context, codes)
+
+        def record(pos, result):
+            nonlocal tokens_in, tokens_out, cost
+            parsed, t_in, t_out, c = result
+            responses[pos] = parsed  # None = API call failed or unparseable
+            tokens_in += t_in
+            tokens_out += t_out
+            cost += c
+
+        # A cache entry becomes readable only once the first response has started, so
+        # calls fired together all miss and each pays a full write. The first unit
+        # goes alone; the rest then read the prompt it cached.
+        if jobs:
+            pos, u, ctx = jobs[0]
+            record(pos, call_claude_with_retry(client, system_prompt, u["text"], ctx, run.model))
         with ThreadPoolExecutor(max_workers=run.max_workers) as executor:
             future_to_pos = {
                 executor.submit(call_claude_with_retry, client, system_prompt,
                                 u["text"], ctx, run.model): pos
-                for pos, u, ctx in jobs
+                for pos, u, ctx in jobs[1:]
             }
             for future in as_completed(future_to_pos):
-                pos = future_to_pos[future]
-                parsed, t_in, t_out = future.result()
-                responses[pos] = parsed  # None = API call failed or unparseable
-                tokens_in += t_in
-                tokens_out += t_out
+                record(future_to_pos[future], future.result())
 
     offsets = None
     if unit != "document":
@@ -418,7 +438,7 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
                           end_offset=end, row_index=u["row_index"], speaker=u["speaker"],
                           status=status,
                           no_code_rationale=" | ".join(no_code_rationales) or None))
-    return tokens_in, tokens_out
+    return tokens_in, tokens_out, cost
 
 
 def execute_run(run_id: int):
@@ -473,8 +493,8 @@ def execute_run(run_id: int):
                 ws_ = doc_db.get(Workspace, workspace_id)
                 run_doc = doc_db.get(RunDocument, (run_id, document_id))
                 try:
-                    t_in, t_out = _process_document(doc_db, run_, ws_, run_doc,
-                                                    client, dict_index)
+                    t_in, t_out, doc_cost = _process_document(doc_db, run_, ws_, run_doc,
+                                                              client, dict_index)
                     run_doc.status = "completed"
                     run_doc.coded_at = datetime.utcnow()
                 except Exception as e:
@@ -483,11 +503,13 @@ def execute_run(run_id: int):
                     run_doc.status = "failed"
                     failed_files.append(f"{run_doc.document.filename}: {e}")
                     t_in = t_out = 0
+                    doc_cost = 0.0
                 run_ = doc_db.get(Run, run_id)
                 run_.cost_input_tokens += t_in
                 run_.cost_output_tokens += t_out
-                run_.cost_usd = calc_cost(run_.model, run_.cost_input_tokens,
-                                          run_.cost_output_tokens)
+                # summed per call, not recomputed from the token totals: those totals
+                # mix cached and uncached input, which are billed at different rates
+                run_.cost_usd = (run_.cost_usd or 0.0) + doc_cost
                 doc_db.commit()  # per-document commit: polling sees progress, retry sees state
             finally:
                 doc_db.close()  # releases this document's rows from memory
@@ -566,14 +588,17 @@ def estimate_run_cost(ws: Workspace, documents, unit: str,
     seg_tokens_total = round(seg_tokens * scale)
     ctx_tokens_total = round(ctx_tokens * scale)
 
-    input_tokens = (system_tokens                                   # first call, cache write
-                    + int(system_tokens * 0.1) * (n_segments - 1)   # cache reads
-                    + seg_tokens_total + ctx_tokens_total
-                    + EST_PROMPT_OVERHEAD_TOKENS * n_segments)
+    # one cache write per document (the first unit goes alone), reads for the rest
+    n_docs = len(docs)
+    cache_write = system_tokens * min(n_docs, n_segments)
+    cache_read = system_tokens * max(0, n_segments - n_docs)
+    uncached = seg_tokens_total + ctx_tokens_total + EST_PROMPT_OVERHEAD_TOKENS * n_segments
     output_tokens = EST_OUTPUT_TOKENS_PER_SEGMENT * n_segments
     return {
         "segments": n_segments,
-        "input_tokens": input_tokens,
+        "input_tokens": uncached + cache_write + cache_read,
         "output_tokens": output_tokens,
-        "cost_usd": round(calc_cost(model, input_tokens, output_tokens), 4),
+        "cost_usd": round(calc_cost(model, uncached, output_tokens,
+                                    cache_write_tokens=cache_write,
+                                    cache_read_tokens=cache_read), 4),
     }

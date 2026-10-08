@@ -325,10 +325,27 @@ _call_count = {"n": 0}
 def _fake_call(client, system_prompt, text, context_utts=None, model="x", max_tokens=1024, max_retries=5):
     resp = _FAKE_RESPONSES[_call_count["n"] % len(_FAKE_RESPONSES)]
     _call_count["n"] += 1
-    return resp, 100, 20
+    return resp, 100, 20, 0.0005
 
 _real_call = coding.call_claude_with_retry
 coding.call_claude_with_retry = _fake_call
+
+# cost: cached input is billed at its own rates, so a call is priced from the usage
+# breakdown and never from the summed input total
+from types import SimpleNamespace as _NS
+from models import calc_cost
+check("cache read priced per model",
+      abs(calc_cost("claude-sonnet-4-6", 0, 0, cache_read_tokens=1_000_000) - 0.30) < 1e-9)
+check("cache write at 1.25x input",
+      abs(calc_cost("claude-sonnet-4-6", 0, 0, cache_write_tokens=1_000_000) - 3.75) < 1e-9)
+_usage = _NS(input_tokens=1_000, output_tokens=100,
+             cache_creation_input_tokens=0, cache_read_input_tokens=9_000)
+_priced_client = _NS(messages=_NS(create=lambda **kw: _NS(
+    usage=_usage, content=[_NS(text='[{"action": "no_code", "rationale": "x"}]')])))
+_, _t_in, _t_out, _c = coding.call_claude(_priced_client, "sys", "text", model="claude-sonnet-4-6")
+check("call priced from the breakdown",
+      _t_in == 10_000 and abs(_c - (1_000 * 3.0 + 9_000 * 0.30 + 100 * 15.0) / 1e6) < 1e-12,
+      f"{_t_in} {_c}")
 
 
 class _FakeAnthropicClient:
