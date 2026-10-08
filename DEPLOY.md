@@ -40,10 +40,11 @@ docker compose exec app python seed_admin.py
 ```
 
 `docker-compose.yml` maps the app to `127.0.0.1:8007` and mounts `./data` for the SQLite
-file and uploads. `mem_limit: 1500m` plus `OMP_NUM_THREADS=1` / `OPENBLAS_NUM_THREADS=1` cap
-memory on small boxes — spaCy loads 4 language models and a large corpus can otherwise
-OOM-kill the container on a 2-CPU/4GB VPS. Add host swap if running on similarly small
-hardware.
+file and uploads. `mem_limit: 3g` plus `OMP_NUM_THREADS=1` / `OPENBLAS_NUM_THREADS=1` cap
+memory on a shared host — spaCy loads 4 language models, and the analysis of a large run
+passes every coded segment through it. 1500m was enough on the old 2-CPU/4GB VPS for small
+runs, and was raised after the analysis of a 1,753-coding run OOM-killed the container
+twice. On a 4 GB host keep it at 1500m and add swap; large analyses will then fail there.
 
 ## 4. Reverse proxy (HTTPS)
 

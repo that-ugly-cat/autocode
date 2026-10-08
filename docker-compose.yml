@@ -9,10 +9,13 @@ services:
       - "127.0.0.1:8007:8007"
     env_file:
       - .env
-    # Guardrail on a shared 4 GB / 2-CPU box: cap RAM so an autocode spike can't
-    # starve the other containers (it spills to host swap before OOM). Pin BLAS/
-    # spaCy to one thread each so they don't oversubscribe the two cores.
-    mem_limit: 1500m
+    # Guardrail on a shared box: cap RAM so an autocode spike can't starve the
+    # other containers (it spills to host swap before OOM). Pin BLAS/spaCy to one
+    # thread each so they don't oversubscribe the cores.
+    # 1500m was sized for the old 4 GB / 2-CPU host. On the 12 GB host it killed the
+    # app twice on 8 Oct 2026: the analysis of a 1,753-coding run (spaCy over every
+    # segment) went past it. 3g leaves the other containers well over half the RAM.
+    mem_limit: 3g
     environment:
       - OMP_NUM_THREADS=1
       - OPENBLAS_NUM_THREADS=1
