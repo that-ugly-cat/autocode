@@ -52,6 +52,34 @@
   </tbody>
 </table>
 
+{% if error_counts %}
+<div class="card">
+  <h3>{{ T.run_errors_title }}</h3>
+  <p class="muted small">{{ T.run_errors_hint }}</p>
+  <ul>
+    {% for code, n in error_counts|dictsort %}
+    <li><strong>{{ n }}</strong> — {{ T.get('run_err_' + code, code) }}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if prompts %}
+<details class="card">
+  <summary>{{ T.run_prompt_title }}{% if prompts|length > 1 %} ({{ prompts|length }} {{ T.run_prompt_versions }}){% endif %}</summary>
+  <p class="muted small">{{ T.run_prompt_hint }}</p>
+  {% if request_config %}
+  <p class="small"><code>{{ request_config|tojson }}</code></p>
+  {% endif %}
+  {% for sha, text in prompts.items() %}
+  <div class="modal-section">
+    <p class="muted small">sha256 {{ sha[:12] }} · {{ (docs_by_sha.get(sha) or [])|join(', ') }}</p>
+    <pre class="small">{{ text }}</pre>
+  </div>
+  {% endfor %}
+</details>
+{% endif %}
+
 <div id="run-flash" class="flash" style="display:none"></div>
 {% endblock %}
 {% block scripts %}

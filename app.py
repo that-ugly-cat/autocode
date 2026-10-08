@@ -498,7 +498,8 @@ def page_settings(request: Request, workspace_id: int, db: Session = Depends(get
         stoplists = {}
     return render(request, "workspace_settings.html", user, ws=ws,
                   is_owner=(user.is_admin or ws.owner_id == user.id),
-                  spacy_langs=sorted(SPACY_MODELS), stoplists=stoplists)
+                  spacy_langs=sorted(SPACY_MODELS), stoplists=stoplists,
+                  default_coding_rules=coding.DEFAULT_CODING_RULES)
 
 
 @app.get("/workspace/{workspace_id}/runs/{run_id}/analysis", response_class=HTMLResponse)
@@ -583,10 +584,25 @@ def page_run_detail(request: Request, workspace_id: int, run_id: int,
     n_uncoded = (db.query(RunSegment)
                  .filter(RunSegment.run_id == run.id,
                          RunSegment.status.notin_(("coded", "excluded"))).count())
+    # units that could not be coded, counted by error code (the detail stays in the
+    # export: it differs call by call, the code is what tells you what to fix)
+    error_counts: dict[str, int] = {}
+    for (reason,) in (db.query(RunSegment.error_reason)
+                      .filter(RunSegment.run_id == run.id, RunSegment.status == "error")):
+        code = (reason or "unrecorded").split(":", 1)[0]
+        error_counts[code] = error_counts.get(code, 0) + 1
+    prompts = json.loads(run.system_prompts_json or "{}")
+    docs_by_sha: dict[str, list[str]] = {}
+    for rd in run.run_documents:
+        if rd.system_prompt_sha:
+            docs_by_sha.setdefault(rd.system_prompt_sha, []).append(rd.document.display_name)
     return render(request, "run_detail.html", user, ws=ws,
                   is_owner=(user.is_admin or ws.owner_id == user.id),
                   run=run, n_codings=n_codings, n_new_codes=n_new_codes,
-                  n_segments=n_segments, n_uncoded=n_uncoded, n_excluded=n_excluded)
+                  n_segments=n_segments, n_uncoded=n_uncoded, n_excluded=n_excluded,
+                  error_counts=error_counts, prompts=prompts, docs_by_sha=docs_by_sha,
+                  request_config=(json.loads(run.request_config_json)
+                                  if run.request_config_json else None))
 
 
 @app.get("/guide", response_class=HTMLResponse)
@@ -636,6 +652,7 @@ class WorkspaceIn(BaseModel):
     name: str
     description: str | None = None
     study_context: str | None = None
+    coding_instructions: str | None = None
     input_type: str = "docx"
     segmentation_mode: str = "utterance_regex"
     segmentation_regex: str | None = None
@@ -668,6 +685,7 @@ def api_create_workspace(data: WorkspaceIn, user: User = Depends(get_current_use
     ws = Workspace(
         name=data.name.strip(), description=(data.description or "").strip() or None,
         study_context=(data.study_context or "").strip() or None,
+        coding_instructions=(data.coding_instructions or "").strip() or None,
         owner_id=user.id, input_type=data.input_type,
         # legacy column: honoured if a valid mode is given (API), else a sane default;
         # the real coding unit is chosen per run, so the UI no longer sets this
@@ -698,6 +716,9 @@ def api_update_workspace(workspace_id: int, data: WorkspaceIn,
     ws.name = data.name.strip() or ws.name
     ws.description = (data.description or "").strip() or None
     ws.study_context = (data.study_context or "").strip() or None
+    # None means the client did not send the field (an older page, the API): keep it
+    if data.coding_instructions is not None:
+        ws.coding_instructions = data.coding_instructions.strip() or None
     # segmentation_mode is no longer a workspace setting (chosen per run); reset the
     # legacy default if the input type flips, but still honour a valid explicit mode (API)
     allowed_modes = EXCEL_SEG_MODES if data.input_type == "excel" else DOCX_SEG_MODES
@@ -748,6 +769,7 @@ def api_duplicate_workspace(workspace_id: int, data: DuplicateIn,
     new = Workspace(
         name=(data.name or "").strip() or f"{src.name} (copy)",
         description=src.description, study_context=src.study_context,
+        coding_instructions=src.coding_instructions,
         owner_id=user.id, input_type=src.input_type,
         segmentation_mode=src.segmentation_mode, segmentation_regex=src.segmentation_regex,
         segmentation_language=src.segmentation_language, stoplists_json=src.stoplists_json,

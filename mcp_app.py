@@ -56,6 +56,16 @@ def _d(dt) -> str | None:
     return dt.strftime("%Y-%m-%d %H:%M") if dt else None
 
 
+def _tally(reasons) -> dict:
+    """Count error reasons by their code, the part before the colon: the details
+    differ call by call, the codes are what can be compared."""
+    out: dict = {}
+    for r in reasons:
+        code = r.split(":", 1)[0]
+        out[code] = out.get(code, 0) + 1
+    return out
+
+
 # ── Shapes ────────────────────────────────────────────────────────────────────
 
 def _ws_brief(ws: Workspace, db, user: User) -> dict:
@@ -178,6 +188,8 @@ def get_workspace(workspace: str) -> dict:
         out = _ws_brief(ws, db, user)
         out.update({
             "study_context": ws.study_context,
+            # None: runs use the engine's default coding rules
+            "coding_instructions": ws.coding_instructions,
             "segmentation": {
                 "default_unit": ws.segmentation_mode,
                 "allowed_units": sorted(runs_mod.allowed_units(ws)),
@@ -307,6 +319,14 @@ def get_run(run_id: int) -> dict:
             if run.excluded_roles_snapshot else [],
             "cost_input_tokens": run.cost_input_tokens,
             "cost_output_tokens": run.cost_output_tokens,
+            "request_config": json.loads(run.request_config_json)
+            if run.request_config_json else None,
+            "prompt_versions": [
+                {"sha256": sha, "documents": sum(1 for rd in run.run_documents
+                                                 if rd.system_prompt_sha == sha)}
+                for sha in json.loads(run.system_prompts_json or "{}")],
+            "error_reasons": _tally(s.error_reason or "unrecorded" for s in segs
+                                   if s.status == "error"),
             "documents_status": [
                 {"id": rd.document_id, "name": rd.document.display_name,
                  "status": rd.status, "coded_at": _d(rd.coded_at)}
@@ -456,7 +476,7 @@ def get_analysis(run_id: int, section: str = "", top: int = 25) -> dict:
 
 @mcp.tool()
 def create_workspace(name: str, description: str = "", study_context: str = "",
-                     input_type: str = "docx") -> dict:
+                     input_type: str = "docx", coding_instructions: str = "") -> dict:
     """
     A new workspace. input_type: docx (transcripts, one file per document) or
     excel (a spreadsheet, one column per document). It is fixed once the corpus
@@ -466,6 +486,10 @@ def create_workspace(name: str, description: str = "", study_context: str = "",
     is about, who was interviewed, what the reading is for. The LLM engine
     refuses to start without it, and that refusal is the point: a coder who does
     not know the study is a coder producing plausible noise.
+
+    `coding_instructions`, when given, replaces the engine's default coding rules
+    in that prompt (how many codes a unit takes, when to leave it uncoded, whether
+    to propose codes). Leave it empty to keep the defaults.
     """
     db = SessionLocal()
     try:
@@ -477,6 +501,7 @@ def create_workspace(name: str, description: str = "", study_context: str = "",
         ws = Workspace(name=name.strip(),
                        description=description.strip() or None,
                        study_context=study_context.strip() or None,
+                       coding_instructions=coding_instructions.strip() or None,
                        owner_id=user.id, input_type=input_type,
                        segmentation_mode="cell" if input_type == "excel"
                        else "utterance_regex")
@@ -495,10 +520,16 @@ def create_workspace(name: str, description: str = "", study_context: str = "",
 
 @mcp.tool()
 def update_workspace(workspace: str, name: str = "", description: str = "",
-                     study_context: str = "") -> dict:
+                     study_context: str = "", coding_instructions: str = "",
+                     clear_coding_instructions: bool = False) -> dict:
     """
-    Edit a workspace's name, description or study context. Empty fields are left
-    alone, so this can carry one change at a time.
+    Edit a workspace's name, description, study context or coding instructions.
+    Empty fields are left alone, so this can carry one change at a time; because
+    empty means "leave alone", going back to the default coding rules takes
+    `clear_coding_instructions=True`.
+
+    The instructions replace the engine's default rules for runs launched from now
+    on; every run keeps the prompt it was sent, so earlier runs stay readable.
 
     The input type and the segmentation settings are not here: changing them
     reinterprets a corpus that is already uploaded, and that belongs on a screen
@@ -517,6 +548,12 @@ def update_workspace(workspace: str, name: str = "", description: str = "",
         if study_context.strip():
             ws.study_context = study_context.strip()
             changed.append("study_context")
+        if clear_coding_instructions:
+            ws.coding_instructions = None
+            changed.append("coding_instructions")
+        elif coding_instructions.strip():
+            ws.coding_instructions = coding_instructions.strip()
+            changed.append("coding_instructions")
         if not changed:
             return {"ok": True, "unchanged": True}
         db.commit()

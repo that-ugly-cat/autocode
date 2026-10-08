@@ -17,6 +17,7 @@ non-codable parent <Code> wrapping its members, uncategorised codes stay at the
 root. Codings always target the child guid, never the parent.
 """
 import io
+import json
 import re
 import uuid
 import zipfile
@@ -82,12 +83,26 @@ def export_xlsx_bytes(run: Run, db) -> bytes:
         "excel_row": s.row_index,
         "speaker": s.speaker or "",
         "position": s.position,
+        "start_offset": s.start_offset,
+        "end_offset": s.end_offset,
         "segment_text": s.segment_text,
         "status": s.status,
         "codes": "; ".join(labels_by_key.get(
             (s.document_id, s.start_offset, s.end_offset, s.segment_text), [])),
         "no_code_rationale": s.no_code_rationale or "",
+        "error_reason": s.error_reason or "",
     } for s in segments]
+
+    # what the model was sent: one row per distinct system prompt, with the documents
+    # coded under it, plus how the model was called. Runs before 2026-10-08 have neither.
+    prompts = json.loads(run.system_prompts_json or "{}")
+    docs_by_sha: dict[str, list[str]] = {}
+    for rd in run.run_documents:
+        if rd.system_prompt_sha:
+            docs_by_sha.setdefault(rd.system_prompt_sha, []).append(rd.document.display_name)
+    prompt_rows = [{"sha256": sha, "documents": "; ".join(docs_by_sha.get(sha, [])),
+                    "request_config": run.request_config_json or "", "system_prompt": text}
+                   for sha, text in prompts.items()]
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -95,6 +110,8 @@ def export_xlsx_bytes(run: Run, db) -> bytes:
         if seg_rows:  # legacy runs predate RunSegment and have no coverage data
             pd.DataFrame(seg_rows).to_excel(writer, sheet_name="segments", index=False)
         pd.DataFrame(cb_rows).to_excel(writer, sheet_name="codebook", index=False)
+        if prompt_rows:
+            pd.DataFrame(prompt_rows).to_excel(writer, sheet_name="prompt", index=False)
     return buf.getvalue()
 
 

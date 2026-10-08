@@ -31,6 +31,7 @@ for p in ("data/test.db", "data/test_uploads"):
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 from models import RunSegment as _Seg  # noqa: E402
+from models import Workspace as _Ws  # noqa: E402
 
 client = TestClient(app_module.app)
 FAILED = []
@@ -157,7 +158,15 @@ r = member.put(f"/api/workspaces/{ws_id}", json={"name": "Hacked", "segmentation
 check("member cannot edit settings", r.status_code == 403)
 
 print("== corpus ==")
-docx_path = Path("../test_transcripts/transcript_P01.docx")
+# The fixtures are synthetic transcripts kept outside the repo. Their old relative home
+# (../test_transcripts, from when this code lived in tools/autocode/deploy) no longer
+# exists next to the repo, and without them every docx run check is skipped while the
+# summary still reads "All checks passed". Point AUTOCODE_FIXTURES at them, and set
+# AUTOCODE_REQUIRE_FIXTURES=1 to make their absence a failure instead of a skip.
+FIXTURES = Path(os.environ.get("AUTOCODE_FIXTURES", "../test_transcripts"))
+if os.environ.get("AUTOCODE_REQUIRE_FIXTURES") and not (FIXTURES / "transcript_P01.docx").exists():
+    sys.exit(f"fixtures not found in {FIXTURES.resolve()}")
+docx_path = FIXTURES / "transcript_P01.docx"
 if docx_path.exists():
     with docx_path.open("rb") as f:
         r = client.post(f"/api/workspaces/{ws_id}/documents",
@@ -211,7 +220,7 @@ check("cleared cluster drops out of datalist", '<option value="Principles">' not
 r = client.put(f"/api/codes/{clustered_id}",
                json={"label": "beneficence", "cluster": "Principles", "description": "Doing good"})
 check("cluster restored", r.status_code == 200, r.text)
-cb_path = Path("../test_transcripts/codebook.xlsx")
+cb_path = FIXTURES / "codebook.xlsx"
 if cb_path.exists():
     with cb_path.open("rb") as f:
         r = client.post(f"/api/workspaces/{ws_id}/codebook/preview-import",
@@ -322,10 +331,13 @@ _FAKE_RESPONSES = [
 ]
 _call_count = {"n": 0}
 
-def _fake_call(client, system_prompt, text, context_utts=None, model="x", max_tokens=1024, max_retries=5):
+_seen_prompts = []
+
+def _fake_call(client, system_prompt, text, context_utts=None, model="x", max_retries=5):
+    _seen_prompts.append(system_prompt)
     resp = _FAKE_RESPONSES[_call_count["n"] % len(_FAKE_RESPONSES)]
     _call_count["n"] += 1
-    return resp, 100, 20, 0.0005
+    return coding.CallResult(resp, 100, 20, 0.0005)
 
 _real_call = coding.call_claude_with_retry
 coding.call_claude_with_retry = _fake_call
@@ -342,10 +354,65 @@ _usage = _NS(input_tokens=1_000, output_tokens=100,
              cache_creation_input_tokens=0, cache_read_input_tokens=9_000)
 _priced_client = _NS(messages=_NS(create=lambda **kw: _NS(
     usage=_usage, content=[_NS(text='[{"action": "no_code", "rationale": "x"}]')])))
-_, _t_in, _t_out, _c = coding.call_claude(_priced_client, "sys", "text", model="claude-sonnet-4-6")
+_res = coding.call_claude(_priced_client, "sys", "text", model="claude-sonnet-4-6")
 check("call priced from the breakdown",
-      _t_in == 10_000 and abs(_c - (1_000 * 3.0 + 9_000 * 0.30 + 100 * 15.0) / 1e6) < 1e-12,
-      f"{_t_in} {_c}")
+      _res.tokens_in == 10_000
+      and abs(_res.cost - (1_000 * 3.0 + 9_000 * 0.30 + 100 * 15.0) / 1e6) < 1e-12,
+      str(_res))
+check("legacy bare-array reply still read", _res.entries and _res.entries[0]["action"] == "no_code",
+      str(_res))
+
+# how each model is called: one client that records the request and answers as told
+_sent = {}
+
+def _client_answering(content, stop_reason="end_turn", stop_details=None):
+    def create(**kw):
+        _sent.clear(); _sent.update(kw)
+        return _NS(usage=_NS(input_tokens=10, output_tokens=5, cache_creation_input_tokens=0,
+                             cache_read_input_tokens=0),
+                   content=content, stop_reason=stop_reason, stop_details=stop_details)
+    return _NS(messages=_NS(create=create))
+
+_ok_reply = [_NS(type="text", text='{"codings": [{"action": "use_existing", "code": "autonomy", '
+                                    '"description": "", "example": "", "rationale": "r"}]}')]
+coding.call_claude(_client_answering(_ok_reply), "sys", "t", model="claude-sonnet-4-6")
+check("sonnet 4.6: no structured output, no effort",
+      "output_config" not in _sent and _sent["max_tokens"] == 4096, str(_sent.get("output_config")))
+coding.call_claude(_client_answering(_ok_reply), "sys", "t", model="claude-opus-4-8")
+check("opus 4.8: reply constrained to the codings schema",
+      _sent.get("output_config", {}).get("format", {}).get("schema") == coding.CODINGS_SCHEMA
+      and "effort" not in _sent["output_config"], str(_sent.get("output_config"))[:200])
+for _m in ("claude-sonnet-5", "claude-opus-5-5"):
+    _r = coding.call_claude(_client_answering(
+        [_NS(type="thinking", thinking=""), *_ok_reply]), "sys", "t", model=_m)
+    check(f"{_m}: effort set, room for thinking, structured",
+          _sent["output_config"].get("effort") == "low" and _sent["max_tokens"] == 16000
+          and "format" in _sent["output_config"] and "thinking" not in _sent, str(_sent)[:200])
+    check(f"{_m}: reply read past the thinking block",
+          _r.entries and _r.entries[0]["code"] == "autonomy" and _r.error is None, str(_r))
+check("empty optional fields read as absent", _r.entries[0]["description"] is None, str(_r))
+_r = coding.call_claude(_client_answering(_ok_reply, stop_reason="max_tokens"), "sys", "t",
+                        model="claude-sonnet-4-6")
+check("truncated reply is an error, not a coding",
+      _r.entries is None and _r.error.startswith("truncated") and _r.cost > 0, str(_r))
+_r = coding.call_claude(_client_answering(_ok_reply, stop_reason="refusal",
+                                          stop_details=_NS(category="bio")),
+                        "sys", "t", model="claude-opus-5-5")
+check("refusal is an error with its category", _r.error == "refusal: bio", str(_r))
+_r = coding.call_claude(_client_answering([_NS(type="text", text="not json")]), "sys", "t",
+                        model="claude-sonnet-4-6")
+check("unreadable reply is bad_json", _r.error == "bad_json", str(_r))
+
+def _boom(**kw):
+    raise RuntimeError("socket closed")
+_r = _real_call(_NS(messages=_NS(create=_boom)), "sys", "t", None, "claude-sonnet-4-6")
+check("a failed call keeps its cause", _r.error == "api: RuntimeError: socket closed", str(_r))
+import translations as _tr
+check("every error code has a sentence",
+      all(f"run_err_{c}" in _tr.TRANSLATIONS["en"] for c in coding.ERROR_CODES + ("unrecorded",)),
+      str([c for c in coding.ERROR_CODES if f"run_err_{c}" not in _tr.TRANSLATIONS["en"]]))
+from models import MODEL_PROFILES as _MP, PRICING as _PR
+check("every priced model has a call profile", set(_MP) == set(_PR))
 
 
 class _FakeAnthropicClient:
@@ -430,6 +497,82 @@ if docx_path.exists():
     check("run status reports progress counters",
           data["n_docs"] == len(data["documents"]) and data["n_docs_done"] == data["n_docs"],
           str(data)[:200])
+
+    # the prompt travels with the run: what was sent, and how
+    import json as _json
+    from models import RunDocument as _RD
+    db = SessionLocal()
+    _r1 = db.get(_RunChk, run_id)
+    _prompts = _json.loads(_r1.system_prompts_json or "{}")
+    _rd = db.query(_RD).filter(_RD.run_id == run_id).first()
+    _cfg = _json.loads(_r1.request_config_json or "{}")
+    db.close()
+    check("run keeps the prompt it sent", len(_prompts) == 1
+          and _rd.system_prompt_sha in _prompts
+          and coding.DEFAULT_CODING_RULES in _prompts[_rd.system_prompt_sha], str(_prompts)[:200])
+    check("run keeps how the model was called",
+          _cfg.get("model") == "claude-sonnet-4-6" and _cfg.get("max_tokens") == 4096, str(_cfg))
+
+    # coding instructions replace the default rules, for runs launched from then on
+    _instr = "Assign at most one code per unit: the single most salient one."
+    r = client.put(f"/api/workspaces/{run_ws}",
+                   json={"name": "Run WS", "study_context": "Pilot study on patient autonomy",
+                         "coding_instructions": _instr})
+    check("set coding instructions", r.status_code == 200, r.text)
+    r = client.get(f"/workspace/{run_ws}/settings")
+    check("settings page shows the instructions and their help",
+          r.status_code == 200 and _instr in r.text and 'id="help-instr"' in r.text
+          and "Propose a new code only if" in r.text, r.text[:200])
+    r = client.put(f"/api/workspaces/{run_ws}",
+                   json={"name": "Run WS", "study_context": "Pilot study on patient autonomy"})
+    db = SessionLocal()
+    check("an update that omits the field keeps it",
+          db.get(_Ws, run_ws).coding_instructions == _instr)
+    db.close()
+    _seen_prompts.clear()
+    _FAKE_RESPONSES.append(None)  # one unit comes back uncodable, with a cause
+    _orig_fake = coding.call_claude_with_retry
+
+    def _fake_with_error(client_, system_prompt, text, context_utts=None, model="x", max_retries=5):
+        res = _orig_fake(client_, system_prompt, text, context_utts, model)
+        return (res if res.entries is not None
+                else coding.CallResult(None, 100, 20, 0.0005, coding.error_reason("truncated", "max_tokens=4096")))
+    coding.call_claude_with_retry = _fake_with_error
+    r = client.post(f"/api/workspaces/{run_ws}/runs",
+                    json={"document_ids": [doc_id], "unit": "utterance_regex", "max_workers": 1})
+    irun = r.json()["id"]
+    for _ in range(100):
+        if client.get(f"/api/runs/{irun}").json()["status"] in ("completed", "failed"):
+            break
+        _time.sleep(0.1)
+    coding.call_claude_with_retry = _orig_fake
+    _FAKE_RESPONSES.pop()
+    check("instructions reach the prompt, defaults do not",
+          _seen_prompts and all(_instr in p and coding.DEFAULT_CODING_RULES not in p
+                                for p in _seen_prompts), str(_seen_prompts[:1])[:300])
+    db = SessionLocal()
+    _errs = db.query(_Seg).filter(_Seg.run_id == irun, _Seg.status == "error").all()
+    db.close()
+    check("an uncodable unit keeps its cause",
+          _errs and all(s.error_reason == "truncated: max_tokens=4096" for s in _errs), str(len(_errs)))
+    r = client.get(f"/workspace/{run_ws}/runs/{irun}")
+    check("run page counts causes and shows the prompt",
+          "hit the token ceiling" in r.text and "Prompt sent to the model" in r.text
+          and _instr in r.text, "")
+    r = client.get(f"/api/runs/{irun}/export/xlsx")
+    import openpyxl as _oxl, io as _io2
+    _wb = _oxl.load_workbook(_io2.BytesIO(r.content), read_only=True)
+    _seg_head = next(_wb["segments"].iter_rows(values_only=True))
+    check("export carries offsets, causes and the prompt",
+          {"start_offset", "end_offset", "error_reason"} <= set(_seg_head)
+          and "prompt" in _wb.sheetnames, str(_wb.sheetnames))
+    r = client.put(f"/api/workspaces/{run_ws}",
+                   json={"name": "Run WS", "study_context": "Pilot study on patient autonomy",
+                         "coding_instructions": ""})
+    db = SessionLocal()
+    check("an empty field returns to the default rules",
+          db.get(_Ws, run_ws).coding_instructions is None)
+    db.close()
 
     # per-run coding unit (C1): invalid unit rejected, valid one snapshotted on the run
     r = client.post(f"/api/workspaces/{run_ws}/runs",

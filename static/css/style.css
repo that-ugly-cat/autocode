@@ -371,6 +371,12 @@ tr.row-highlight { background: var(--card-hover) !important; box-shadow: inset 3
   font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.08em; color: var(--muted-3); margin: 0 0 0.6rem;
 }
+/* verbatim prompt text inside a help modal: wraps instead of widening the modal */
+.modal-section pre {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--text);
+}
 .modal-list { list-style: none; display: flex; flex-direction: column; gap: 0.5rem; margin: 0; padding: 0; }
 .modal-list li {
   font-size: 0.82rem; color: var(--muted); line-height: 1.55;

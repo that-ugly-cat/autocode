@@ -15,10 +15,12 @@ New-code dedup (three layers, decided June 2026):
    (one prompt-cache write per codebook version, amortized over the document's segments);
 3. residual near-duplicates stay visible in the codebook UI with the model badge.
 """
+import hashlib
 import json
 import re
 import time
 import traceback
+from typing import NamedTuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -27,10 +29,20 @@ import anthropic
 import conventions
 import dictionary
 from crypto import decrypt_api_key
-from models import (Code, Coding, Run, RunDocument, RunSegment, SessionLocal,
-                    User, UserCostLog, Workspace, calc_cost, normalize_label)
+from models import (MODEL_PROFILES, Code, Coding, Run, RunDocument, RunSegment,
+                    SessionLocal, User, UserCostLog, Workspace, calc_cost, normalize_label)
 from segmentation import (excel_fulltext, load_document_text, load_excel_cells,
                           segment_text, split_sentences, split_utterances)
+
+# The system prompt has three parts with three owners: the study context and the coding
+# instructions belong to the workspace, the codebook to its codes, and the reply format
+# to the engine. A workspace that sets coding instructions replaces DEFAULT_CODING_RULES
+# and nothing else: the reply format stays the engine's, because the parser depends on it.
+DEFAULT_CODING_RULES = """\
+- Assign one or more existing codes if they meaningfully apply.
+- Propose a new code only if no existing code captures an important theme.
+- Leave the excerpt uncoded if it contains no content relevant to the study.
+- A single excerpt may contain multiple themes — code all of them if clearly supported."""
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert qualitative researcher conducting abductive thematic analysis.
@@ -39,22 +51,50 @@ Study context:
 {context}
 
 Your task is to analyze text excerpts and assign qualitative codes from the codebook below.
-Rules:
-- Assign one or more existing codes if they meaningfully apply.
-- Propose a new code only if no existing code captures an important theme.
-- Leave the excerpt uncoded if it contains no content relevant to the study.
-- A single excerpt may contain multiple themes — code all of them if clearly supported.
+
+Coding instructions:
+{instructions}
 
 Codebook:
 {codebook}
 
-Return ONLY a JSON array. Each element must be one of:
-  {{"action": "use_existing", "code": "<label>", "rationale": "<why>"}}
-  {{"action": "create_new", "code": "<label>", "description": "<short def>", "example": "<excerpt>", "rationale": "<why>"}}
-  {{"action": "no_code", "rationale": "<why>"}}
-Return an empty array [] only if the text is completely uninformative."""
+Reply with a JSON object {{"codings": [...]}}. Each element of "codings" has five fields:
+  "action": "use_existing", "create_new" or "no_code"
+  "code": the code label ("" for no_code)
+  "description": a short definition, for create_new only ("" otherwise)
+  "example": the excerpt that motivates it, for create_new only ("" otherwise)
+  "rationale": why
+Use "no_code" with a rationale when the excerpt carries nothing relevant to the study.
+Return {{"codings": []}} only if the text is completely uninformative."""
+
+# The reply schema for models that support structured outputs. Every field is required
+# and unused ones are empty strings: the flat shape keeps the schema free of unions.
+CODINGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "codings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["use_existing", "create_new", "no_code"]},
+                    "code": {"type": "string"},
+                    "description": {"type": "string"},
+                    "example": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["action", "code", "description", "example", "rationale"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["codings"],
+    "additionalProperties": False,
+}
 
 EST_OUTPUT_TOKENS_PER_SEGMENT = 150   # rough average for the JSON response
+# thinking at effort "low", billed as output: a guess until a real run measures it
+EST_THINKING_TOKENS_PER_SEGMENT = 400
 EST_PROMPT_OVERHEAD_TOKENS = 50       # message scaffolding around the excerpt
 
 # Rough run-time estimate (deliberately approximate — the live progress bar refines
@@ -84,11 +124,23 @@ def format_codebook(codes: list[Code]) -> str:
     return "\n".join(f"- **{c.label}**: {c.description or ''}".rstrip() for c in codes)
 
 
-def build_system_prompt(study_context: str, codes: list[Code]) -> str:
+def build_system_prompt(study_context: str, codes: list[Code],
+                        coding_instructions: str | None = None) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
         context=(study_context or "").strip() or "(no study context provided)",
+        instructions=(coding_instructions or "").strip() or DEFAULT_CODING_RULES,
         codebook=format_codebook(codes),
     )
+
+
+def workspace_prompt(ws: Workspace, codes: list[Code]) -> str:
+    """The system prompt for a workspace as it stands: what a run would send now."""
+    return build_system_prompt(ws.study_context or ws.description or ws.name, codes,
+                               getattr(ws, "coding_instructions", None))
+
+
+def prompt_sha(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def format_context(context_utts: list[dict]) -> str:
@@ -110,17 +162,62 @@ def parse_json_response(content: str):
         return None
 
 
+def normalize_reply(parsed) -> list | None:
+    """The reply as a list of entries, whatever shape it came in: the current
+    {"codings": [...]} object, or the bare array older prompts asked for. Empty strings
+    in the optional fields become None, so a structured reply reads like a free one."""
+    if isinstance(parsed, dict):
+        parsed = parsed.get("codings")
+    if not isinstance(parsed, list):
+        return None
+    entries = []
+    for e in parsed:
+        if not isinstance(e, dict):
+            continue
+        entries.append({k: (v if not (isinstance(v, str) and not v.strip()) else None)
+                        for k, v in e.items()})
+    return entries
+
+
 # ── API calls ─────────────────────────────────────────────────────────────────
 
+# Why a unit could not be coded. The reason is stored as "<code>: <detail>": the code
+# is a stable identifier to count and to translate, the detail is raw (a limit, a
+# category, a library's own message) and passes through untouched.
+ERROR_CODES = ("truncated", "refusal", "no_text", "bad_json", "rate_limited", "api")
+
+
+def error_reason(code: str, detail: str = "") -> str:
+    assert code in ERROR_CODES, code
+    return f"{code}: {detail}"[:300] if detail else code
+
+
+class CallResult(NamedTuple):
+    """One API call. `entries` is None when the unit could not be coded, and then
+    `error` says why: the reason travels to the unit instead of being swallowed."""
+    entries: list | None
+    tokens_in: int
+    tokens_out: int
+    cost: float
+    error: str | None = None
+
+
+def request_config(model: str) -> dict:
+    """How a model is called: recorded on the run so the call can be reproduced."""
+    p = MODEL_PROFILES.get(model, MODEL_PROFILES["claude-sonnet-4-6"])
+    return {"model": model, "max_tokens": p["max_tokens"], "effort": p["effort"],
+            "structured_output": p["structured"], "thinking": "default" if p["thinks"] else "off"}
+
+
 def call_claude(client, system_prompt, text, context_utts=None,
-                model="claude-sonnet-4-6", max_tokens=1024):
-    """Returns (parsed_response_or_None, tokens_in, tokens_out, cost_usd). Prompt caching
-    on system.
+                model="claude-sonnet-4-6") -> CallResult:
+    """One unit, one call. Prompt caching on system.
 
     `tokens_in` counts every input token, cached or not, so the run's token totals keep
     their meaning. The cost cannot be derived from that total: cache writes and reads
     are billed at different rates, so it is priced here, per call, from the breakdown
     the API returns — the only place where that breakdown exists."""
+    profile = MODEL_PROFILES.get(model, MODEL_PROFILES["claude-sonnet-4-6"])
     if context_utts:
         user_content = (
             f"[CONTEXT — surrounding utterances, do not code]\n"
@@ -130,11 +227,19 @@ def call_claude(client, system_prompt, text, context_utts=None,
     else:
         user_content = f'Analyze this excerpt:\n"{text.strip()}"'
 
+    output_config = {}
+    if profile["structured"]:
+        output_config["format"] = {"type": "json_schema", "schema": CODINGS_SCHEMA}
+    if profile["effort"]:
+        output_config["effort"] = profile["effort"]
+    kwargs = {"output_config": output_config} if output_config else {}
+
     response = client.messages.create(
         model=model,
-        max_tokens=max_tokens,
+        max_tokens=profile["max_tokens"],
         system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user_content}],
+        **kwargs,
     )
     usage = response.usage
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
@@ -142,23 +247,43 @@ def call_claude(client, system_prompt, text, context_utts=None,
     tokens_in = usage.input_tokens + cache_write + cache_read
     cost = calc_cost(model, usage.input_tokens, usage.output_tokens,
                      cache_write_tokens=cache_write, cache_read_tokens=cache_read)
-    return parse_json_response(response.content[0].text), tokens_in, usage.output_tokens, cost
+
+    def failed(reason):
+        return CallResult(None, tokens_in, usage.output_tokens, cost, reason)
+
+    # a reply cut at the ceiling, or a declined one, may still parse into something:
+    # it is not a coding, and it must not be read as one
+    stop = getattr(response, "stop_reason", None)
+    if stop == "max_tokens":
+        return failed(error_reason("truncated", f"max_tokens={profile['max_tokens']}"))
+    if stop == "refusal":
+        details = getattr(response, "stop_details", None)
+        return failed(error_reason("refusal", getattr(details, "category", None) or ""))
+    # thinking models put thinking blocks before the text, so the reply is not content[0]
+    text_out = next((b.text for b in response.content if getattr(b, "type", "text") == "text"), None)
+    if text_out is None:
+        return failed(error_reason("no_text"))
+    entries = normalize_reply(parse_json_response(text_out))
+    if entries is None:
+        return failed(error_reason("bad_json"))
+    return CallResult(entries, tokens_in, usage.output_tokens, cost)
 
 
 def call_claude_with_retry(client, system_prompt, text, context_utts=None,
-                           model="claude-sonnet-4-6", max_tokens=1024, max_retries=5):
-    """Exponential backoff on rate limits; other errors yield an empty result."""
+                           model="claude-sonnet-4-6", max_retries=5) -> CallResult:
+    """Exponential backoff on rate limits. Any other failure becomes a CallResult with
+    the reason, so the unit shows why it was not coded."""
     for attempt in range(max_retries):
         try:
-            return call_claude(client, system_prompt, text, context_utts, model, max_tokens)
-        except anthropic.RateLimitError:
+            return call_claude(client, system_prompt, text, context_utts, model)
+        except anthropic.RateLimitError as e:
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                return None, 0, 0, 0.0
-        except Exception:
-            return None, 0, 0, 0.0
-    return None, 0, 0, 0.0
+                return CallResult(None, 0, 0, 0.0, error_reason("rate_limited", str(e)))
+        except Exception as e:
+            return CallResult(None, 0, 0, 0.0, error_reason("api", f"{type(e).__name__}: {e}"))
+    return CallResult(None, 0, 0, 0.0, error_reason("api", "no attempt made"))
 
 
 # ── Offsets (per_utterance QDPX anchoring) ────────────────────────────────────
@@ -343,6 +468,7 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
     # but they stay in `contexts` so the model still sees e.g. the question
     jobs = [(i, u, contexts[i]) for i, u in enumerate(units) if not u["excluded"]]
     responses = [None] * len(units)
+    errors = [None] * len(units)
     tokens_in = tokens_out = 0
     cost = 0.0
 
@@ -366,16 +492,22 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
                 })
             responses[pos] = entries
     else:
-        study_context = ws.study_context or ws.description or ws.name
-        system_prompt = build_system_prompt(study_context, codes)
+        system_prompt = workspace_prompt(ws, codes)
+        # audit: the exact prompt this document was coded with, stored once per version
+        sha = prompt_sha(system_prompt)
+        prompts = json.loads(run.system_prompts_json or "{}")
+        if sha not in prompts:
+            prompts[sha] = system_prompt
+            run.system_prompts_json = json.dumps(prompts, ensure_ascii=False)
+        run_doc.system_prompt_sha = sha
 
-        def record(pos, result):
+        def record(pos, result: CallResult):
             nonlocal tokens_in, tokens_out, cost
-            parsed, t_in, t_out, c = result
-            responses[pos] = parsed  # None = API call failed or unparseable
-            tokens_in += t_in
-            tokens_out += t_out
-            cost += c
+            responses[pos] = result.entries  # None = the unit could not be coded
+            errors[pos] = result.error
+            tokens_in += result.tokens_in
+            tokens_out += result.tokens_out
+            cost += result.cost
 
         # A cache entry becomes readable only once the first response has started, so
         # calls fired together all miss and each pays a full write. The first unit
@@ -437,7 +569,8 @@ def _process_document(db, run: Run, ws: Workspace, run_doc: RunDocument, client,
                           segment_text=u["text"], start_offset=start,
                           end_offset=end, row_index=u["row_index"], speaker=u["speaker"],
                           status=status,
-                          no_code_rationale=" | ".join(no_code_rationales) or None))
+                          no_code_rationale=" | ".join(no_code_rationales) or None,
+                          error_reason=errors[pos] if status == "error" else None))
     return tokens_in, tokens_out, cost
 
 
@@ -478,6 +611,8 @@ def execute_run(run_id: int):
             run.codebook_snapshot_json = json.dumps(
                 [{"label": c.label, "description": c.description, "example": c.example}
                  for c in _active_codes(db, ws.id)], ensure_ascii=False)
+        if run.engine == "llm" and not run.request_config_json:
+            run.request_config_json = json.dumps(request_config(run.model))
         run.status = "running"
         run.started_at = run.started_at or datetime.utcnow()
         run.error_message = None
@@ -552,15 +687,16 @@ def estimate_run_cost(ws: Workspace, documents, unit: str,
                       context_window: int, model: str, codes: list[Code],
                       excluded_roles: list[str] | None = None) -> dict:
     """
-    Rough estimate: chars/4 ≈ tokens. The cached system prompt is counted once at
-    full price and at 10% for subsequent calls (cache reads).
+    Rough estimate: chars/4 ≈ tokens. The cached system prompt is priced as one cache
+    write per document and cache reads for every other call.
 
     Segmenting the whole corpus here would redo the run's work (spaCy on every
     document for sentence mode) and time out on large corpora — so we segment a
-    sample of documents and scale to the full count. It is a "circa" estimate.
+    sample of documents and scale to the full count. It is a "circa" estimate, and
+    rougher still on the thinking models, whose output includes thinking we can only
+    guess at.
     """
-    system_tokens = len(build_system_prompt(ws.study_context or ws.description or ws.name,
-                                            codes)) // 4
+    system_tokens = len(workspace_prompt(ws, codes)) // 4
     docs = list(documents)
     sample = docs[:EST_SAMPLE_DOCS]
     n_seg = seg_tokens = ctx_tokens = counted = 0
@@ -593,7 +729,10 @@ def estimate_run_cost(ws: Workspace, documents, unit: str,
     cache_write = system_tokens * min(n_docs, n_segments)
     cache_read = system_tokens * max(0, n_segments - n_docs)
     uncached = seg_tokens_total + ctx_tokens_total + EST_PROMPT_OVERHEAD_TOKENS * n_segments
-    output_tokens = EST_OUTPUT_TOKENS_PER_SEGMENT * n_segments
+    per_unit_out = EST_OUTPUT_TOKENS_PER_SEGMENT
+    if MODEL_PROFILES.get(model, {}).get("thinks"):
+        per_unit_out += EST_THINKING_TOKENS_PER_SEGMENT
+    output_tokens = per_unit_out * n_segments
     return {
         "segments": n_segments,
         "input_tokens": uncached + cache_write + cache_read,

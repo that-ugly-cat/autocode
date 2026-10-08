@@ -11,6 +11,11 @@
     <label>{{ T.ws_name }}<input type="text" id="set-name" value="{{ ws.name }}" required></label>
     <label>{{ T.ws_description }}<input type="text" id="set-desc" value="{{ ws.description or '' }}"></label>
     <label>{{ T.ws_study_context }}<textarea id="set-study" rows="3" placeholder="{{ T.ws_study_context_hint }}">{{ ws.study_context or '' }}</textarea></label>
+    <label>{{ T.ws_coding_instructions }}
+      <button type="button" class="btn btn-small" onclick="document.getElementById('help-instr').classList.add('open')">?</button>
+      <textarea id="set-instr" rows="5" spellcheck="false" placeholder="{{ default_coding_rules }}">{{ ws.coding_instructions or '' }}</textarea>
+    </label>
+    <p class="muted small">{% if (ws.coding_instructions or '')|trim %}{{ T.ws_coding_instructions_custom }}{% else %}{{ T.ws_coding_instructions_default }}{% endif %}</p>
     <label>{{ T.ws_input_type }}
       <select id="set-input" {% if ws.documents %}disabled title="{{ T.ws_input_locked }}"{% endif %}>
         <option value="docx" {% if ws.input_type == 'docx' %}selected{% endif %}>{{ T.input_docx }}</option>
@@ -29,6 +34,47 @@
     <button type="submit" class="btn btn-primary">{{ T.set_save }}</button>
   </form>
   <div id="set-flash" class="flash" style="display:none"></div>
+</div>
+
+<div class="overlay" id="help-instr">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div><div class="modal-title">{{ T.help_instr_title }}</div>
+        <div class="modal-subtitle">{{ T.help_instr_sub }}</div></div>
+      <button class="modal-close" onclick="document.getElementById('help-instr').classList.remove('open')">✕</button>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.help_instr_where_h }}</h4>
+      <p class="small">{{ T.help_instr_where }}</p>
+      <ul class="modal-list">
+        <li><strong>{{ T.ws_study_context }}</strong> — {{ T.help_instr_part_context }}</li>
+        <li><strong>{{ T.ws_coding_instructions }}</strong> — {{ T.help_instr_part_instr }}</li>
+        <li><strong>{{ T.help_instr_part_codebook_l }}</strong> — {{ T.help_instr_part_codebook }}</li>
+        <li><strong>{{ T.help_instr_part_format_l }}</strong> — {{ T.help_instr_part_format }}</li>
+      </ul>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.help_instr_default_h }}</h4>
+      <p class="small">{{ T.help_instr_default }}</p>
+      <pre class="small">{{ default_coding_rules }}</pre>
+      <p class="small">{{ T.help_instr_replace }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.help_instr_what_h }}</h4>
+      <ul class="modal-list">
+        <li>{{ T.help_instr_what_1 }}</li>
+        <li>{{ T.help_instr_what_2 }}</li>
+        <li>{{ T.help_instr_what_3 }}</li>
+        <li>{{ T.help_instr_what_4 }}</li>
+      </ul>
+      <p class="small">{{ T.help_instr_not }}</p>
+    </div>
+    <div class="modal-section">
+      <h4>{{ T.help_instr_runs_h }}</h4>
+      <p class="small">{{ T.help_instr_runs }}</p>
+      <p class="muted small">{{ T.help_instr_lang }}</p>
+    </div>
+  </div>
 </div>
 
 <div class="card">
@@ -93,6 +139,7 @@ async function saveSettings(e) {
       stoplists: stoplists,
       description: document.getElementById('set-desc').value,
       study_context: document.getElementById('set-study').value,
+      coding_instructions: document.getElementById('set-instr').value,
       input_type: document.getElementById('set-input').value,
     });
     flash(document.getElementById('set-flash'), '{{ T.saved }}', false);

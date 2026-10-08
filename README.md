@@ -90,6 +90,19 @@ backups.
   `documents` + the files under `data/uploads` (the corpus itself), and `codings` /
   `run_segments` (excerpts of it). A deletion request touches those.
 
+## Tests
+
+`smoke_test.py` exercises the whole HTTP surface in-process against a throwaway database,
+with the Anthropic API mocked. The run-engine checks need synthetic transcripts that live
+outside this repo; point at them, and make their absence fatal:
+
+```bash
+AUTOCODE_FIXTURES=/path/to/test_transcripts AUTOCODE_REQUIRE_FIXTURES=1 python smoke_test.py
+```
+
+Without the fixtures those checks print `[skip]` and the summary still reads "All checks
+passed", which is how they went unrun for three months.
+
 ## License
 
 Copyright (C) 2026 Giovanni Spitale. Licensed under AGPL-3.0 — fork it, host it, sell access

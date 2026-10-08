@@ -65,6 +65,8 @@ class Workspace(Base):
     name                  = Column(String, nullable=False)
     description           = Column(Text, nullable=True)
     study_context         = Column(Text, nullable=True)   # goes into the coding system prompt
+    # replaces the engine's default coding rules in the system prompt when set
+    coding_instructions   = Column(Text, nullable=True)
     owner_id              = Column(Integer, ForeignKey("users.id"), nullable=False)
     input_type            = Column(String, default="docx")  # docx | excel — fixed once corpus is non-empty
     segmentation_mode     = Column(String, default="utterance_regex")  # docx: utterance_regex | paragraph | sentence; excel: cell | sentence
@@ -217,6 +219,12 @@ class Run(Base):
     qdpx_enabled           = Column(Boolean, default=True)  # legacy column: QDPX is always available now
     codebook_snapshot_json = Column(Text, nullable=True)  # audit: codebook at run start
     excluded_roles_snapshot = Column(Text, nullable=True)  # audit: roles excluded at launch
+    # audit: every distinct system prompt the run sent, {sha256: text}. The prompt is
+    # rebuilt at each document boundary (codes proposed earlier join the codebook),
+    # so one run can carry several versions; each RunDocument points at its own.
+    system_prompts_json    = Column(Text, nullable=True)
+    # audit: how the model was called (max_tokens, effort, structured output)
+    request_config_json    = Column(Text, nullable=True)
     started_at             = Column(DateTime, nullable=True)
     completed_at           = Column(DateTime, nullable=True)
     error_message          = Column(Text, nullable=True)
@@ -239,6 +247,7 @@ class RunDocument(Base):
     document_id = Column(Integer, ForeignKey("documents.id"), primary_key=True)
     status      = Column(String, default="pending")  # pending | completed | failed
     coded_at    = Column(DateTime, nullable=True)
+    system_prompt_sha = Column(String, nullable=True)  # key into Run.system_prompts_json
 
     run      = relationship("Run", back_populates="run_documents")
     document = relationship("Document", back_populates="run_links")
@@ -262,6 +271,7 @@ class RunSegment(Base):
     speaker           = Column(String, nullable=True)    # normalized speaker label (utterance docs)
     status            = Column(String, default="no_code")  # coded | no_code | error | excluded
     no_code_rationale = Column(Text, nullable=True)
+    error_reason      = Column(Text, nullable=True)  # why a unit ended in `error` (truncated, refusal, API)
 
     document = relationship("Document", back_populates="run_segments")
 
@@ -291,16 +301,37 @@ class Coding(Base):
 
 # Pricing per million tokens (input, output, cache read) — update when Anthropic
 # changes rates. Cache reads are priced per model rather than as a fixed fraction of
-# input: on newer models the ratio is not the usual 10%.
-#
-# A model enters this table only once the engine can call it as-is: the newer models
-# think by default, and with the engine's max_tokens=1024 that thinking would eat the
-# budget and truncate the JSON reply without raising.
+# input: on newer models the ratio is not the usual 10%. This table is also the list
+# of models a run may use, so a model enters it together with its MODEL_PROFILES row.
 PRICING: dict[str, tuple[float, float, float]] = {
     "claude-sonnet-4-6": (3.0, 15.0, 0.30),
     "claude-opus-4-8":   (5.0, 25.0, 0.50),
     "claude-haiku-4-5":  (1.0,  5.0, 0.10),
+    "claude-sonnet-5":   (2.0, 10.0, 0.20),  # cache read assumed at the usual 10%
+    "claude-opus-5-5":   (4.0, 20.0, 0.20),
 }
+
+# How each model is called.
+#  structured  — the reply is constrained to the codings schema (output_config.format).
+#                Sonnet 4.6 is not on the structured-outputs list, so its JSON is
+#                still pulled out of free text.
+#  thinks      — thinking is on by default and cannot be ruled out: Sonnet 5 runs
+#                adaptive thinking when the parameter is omitted, Opus 5.5 cannot turn
+#                it off at all. Thinking tokens are billed as output and spent out of
+#                max_tokens, which is why these two get a far larger ceiling.
+#  effort      — output_config.effort, the only depth control on the thinking models.
+#                "low" because coding a unit is a bounded judgment, not a long
+#                derivation; worth re-checking against a pilot before a real run.
+#  max_tokens  — a ceiling, not a target: a reply that reaches it is recorded as
+#                truncated on its unit instead of being parsed.
+MODEL_PROFILES: dict[str, dict] = {
+    "claude-sonnet-4-6": {"structured": False, "thinks": False, "effort": None,  "max_tokens": 4096},
+    "claude-opus-4-8":   {"structured": True,  "thinks": False, "effort": None,  "max_tokens": 4096},
+    "claude-haiku-4-5":  {"structured": True,  "thinks": False, "effort": None,  "max_tokens": 4096},
+    "claude-sonnet-5":   {"structured": True,  "thinks": True,  "effort": "low", "max_tokens": 16000},
+    "claude-opus-5-5":   {"structured": True,  "thinks": True,  "effort": "low", "max_tokens": 16000},
+}
+assert set(MODEL_PROFILES) == set(PRICING), "every priced model needs a call profile"
 
 # A 5-minute cache write costs 1.25x the input rate.
 CACHE_WRITE_MULTIPLIER = 1.25
@@ -368,6 +399,12 @@ def init_db():
             "ALTER TABLE users ADD COLUMN borant_sub VARCHAR",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_borant_sub "
             "ON users(borant_sub) WHERE borant_sub IS NOT NULL",
+            # 2026-10-08: coding instructions, prompt audit, per-unit error reasons
+            "ALTER TABLE workspaces ADD COLUMN coding_instructions TEXT",
+            "ALTER TABLE runs ADD COLUMN system_prompts_json TEXT",
+            "ALTER TABLE runs ADD COLUMN request_config_json TEXT",
+            "ALTER TABLE run_documents ADD COLUMN system_prompt_sha VARCHAR",
+            "ALTER TABLE run_segments ADD COLUMN error_reason TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
