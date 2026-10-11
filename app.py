@@ -1455,7 +1455,7 @@ def api_expr_preview(data: ExprPreviewIn, user: User = Depends(get_current_user)
         for e in exprs:
             if not e.strip():
                 continue
-            mode, lemmas = dictionary.parse_expression(e, nlp)
+            mode, lemmas = dictionary.parse_expression(e, nlp, lang)
             items.append({"expression": e, "mode": mode, "lemmas": lemmas})
         preview[lang] = items
     return {"ok": True, "preview": preview}

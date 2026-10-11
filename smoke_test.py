@@ -279,7 +279,8 @@ import dictionary as dict_mod
 
 
 class _FakeToken:
-    STOPS = {"the", "a", "an", "of", "i", "to", "was", "is", "and", "it", "me", "at", "were", "had", "from", "my", "for"}
+    STOPS = {"the", "a", "an", "of", "i", "to", "was", "is", "and", "it", "me", "at", "were", "had", "from", "my", "for",
+             "no"}  # "no" is a stop word in spaCy's English list too
 
     def __init__(self, w):
         self.lemma_ = w
@@ -1030,6 +1031,8 @@ _pd.DataFrame({
         "I had to borrow money from my family to pay for the medication costs every month.",
         "I cannot just go where I want anymore.",            # phrase target (in order)
         "I want to know where you go sometimes.",            # same lemmas, scrambled: phrase must NOT fire
+        "The doctors help a lot with everything.",           # topic word only: "no help" must NOT fire
+        "There was no help at all after the surgery.",       # negation present: "no help" fires
     ],
 }).to_excel(dict_survey, index=False)
 with dict_survey.open("rb") as f:
@@ -1066,6 +1069,9 @@ check("seed dict codes", r.status_code == 200)
 r = dictuser.post(f"/api/workspaces/{dws}/codes",
                   json={"label": "agency", "expressions": {"en": ["\"go where I want\""]}})
 agency_id = r.json()["id"]
+r = dictuser.post(f"/api/workspaces/{dws}/codes",
+                  json={"label": "no_support", "expressions": {"en": ["no help"]}})
+nosup_id = r.json()["id"]
 r = dictuser.put(f"/api/codes/{staff_id}/expressions",
                  json={"expressions": {"en": ["great staff"]}})
 check("set expressions", r.status_code == 200 and r.json()["count"] == 1, r.text)
@@ -1082,7 +1088,7 @@ r = dictuser.get(f"/workspace/{dws}/runs")
 check("coverage warning on runs page", r.status_code == 200 and "have no expressions" in r.text)
 
 r = dictuser.post("/api/expressions/preview",
-                  json={"expressions": {"en": ["borrow money", "of the to", "\"go where I want\""],
+                  json={"expressions": {"en": ["borrow money", "of the to", "\"go where I want\"", "no help"],
                                         "xx": ["skip"]}})
 prev = r.json()["preview"]
 check("lemma preview returns reductions",
@@ -1092,11 +1098,13 @@ check("lemma preview returns reductions",
 check("quoted expression previewed as phrase with stop words kept",
       prev["en"][2]["mode"] == "phrase" and prev["en"][2]["lemmas"] == ["go", "where", "i", "want"],
       str(prev["en"][2]))
+check("signal word survives the stop-word filter in a bag",
+      prev["en"][3]["mode"] == "bag" and prev["en"][3]["lemmas"] == ["no", "help"], str(prev["en"][3]))
 
 r = dictuser.post(f"/api/workspaces/{dws}/runs/estimate",
                   json={"document_ids": [ddoc.id], "engine": "dictionary"})
 check("dict estimate free", r.status_code == 200 and r.json()["cost_usd"] == 0
-      and r.json()["segments"] == 5, r.text)
+      and r.json()["segments"] == 7, r.text)
 r = dictuser.post(f"/api/workspaces/{dws}/runs",
                   json={"document_ids": [ddoc.id], "engine": "dictionary"})
 check("dict run starts without key and study context", r.status_code == 200, r.text)
@@ -1130,7 +1138,10 @@ check("phrase matches the construction in order (row 5)",
       str([(c.row_index, c.matched_expressions) for c in ag]))
 check("phrase rejects scrambled lemmas (row 6 uncoded)",
       all(c.row_index != 6 for c in dcods))
-check("coverage: uncoded rows tracked", data["n_segments"] == 5 and data["n_uncoded"] == 2, str(data)[:150])
+ns = by_code.get(nosup_id, [])
+check("negated bag fires only where the negation is (row 8, not row 7)",
+      [c.row_index for c in ns] == [8], str([(c.row_index, c.matched_expressions) for c in ns]))
+check("coverage: uncoded rows tracked", data["n_segments"] == 7 and data["n_uncoded"] == 3, str(data)[:150])
 
 r = dictuser.get(f"/api/runs/{drun}/export/xlsx")
 xdf2 = _pd.read_excel(_io.BytesIO(r.content))
