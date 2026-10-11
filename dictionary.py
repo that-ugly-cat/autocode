@@ -46,8 +46,14 @@ SIGNAL_WORDS = {
 SIGNAL_WORDS = {lang: frozenset(words.split()) for lang, words in SIGNAL_WORDS.items()}
 
 
+def _is_blank(token) -> bool:
+    """Punctuation, or whitespace spaCy kept as a token: a double space between two
+    words becomes one, and it broke every quoted phrase across it."""
+    return token.is_punct or getattr(token, "is_space", False)
+
+
 def _is_content(token, language: str | None) -> bool:
-    if token.is_punct:
+    if _is_blank(token):
         return False
     if not token.is_stop:
         return True
@@ -78,7 +84,7 @@ def _expression_slots(text: str, nlp, language: str | None, keep_stop: bool) -> 
     docs = [d for d in (list(nlp(v)) for v in variants) if len(d) == len(base)]
     slots = []
     for i, t in enumerate(base):
-        if t.is_punct or (not keep_stop and not _is_content(t, language)):
+        if _is_blank(t) or (not keep_stop and not _is_content(t, language)):
             continue
         slots.append(frozenset(set().union(*(_token_forms(d[i]) for d in docs))))
     return slots
@@ -170,7 +176,7 @@ def match_unit(text: str, language: str, index: dict) -> dict:
         # the content forms (for bags); a form is a lemma or a lowercased word
         seq, bag = [], set()
         for t in sent:
-            if t.is_punct:
+            if _is_blank(t):
                 continue
             forms = _token_forms(t)
             seq.append(forms)
